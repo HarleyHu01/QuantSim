@@ -1,0 +1,16 @@
+# 运行时 / 本地
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 数据与配置（运行时生成 / 本地密钥）
+data/
+.tmp/
+.pipcache/
+.tooling/
+.env
+
+# 前端（后续）
+node_modules/
+web/dist/

@@ -1,0 +1,41 @@
+# QuantSim 默认配置（优先级：代码默认值 < 本文件 < .env）
+log_level: INFO
+api_host: 127.0.0.1
+api_port: 8000
+
+data:
+  timezone: UTC            # 行情统一存储时区
+  display_timezone: null   # UI 展示时区，null = 本地时区
+  adjust: qfq              # A股复权: qfq 前复权 | hfq 后复权 | none 不复权
+  lookback_days: 730       # 首次拉取历史天数
+  incremental: true        # 默认增量更新
+  default_timeframes: ["1d"]
+  akshare_use_proxy: false       # akshare（A股备用源/期货）禁用系统代理（国内数据源直连，防代理拦截）
+  ccxt_exchanges: [okx, bitget, gateio, binance, bybit, kucoin]  # 加密交易所链（按易访问性，可自行调整）
+  ccxt_timeout_ms: 5000
+  providers:
+    priority:
+      stock:  [baostock, akshare, yfinance]   # A股股票：baostock 主源 → akshare（东财/腾讯/新浪）→ yfinance 兜底
+      etf:    [baostock, akshare, yfinance]   # A股 ETF：baostock（2026-01-05 至今）→ akshare → yfinance
+      index:  [baostock, akshare, yfinance]   # 指数：baostock 日/周/月（2006-01-01 至今）；分钟线需求走 akshare/yfinance
+      future: [akshare, yfinance]             # 期货：仅 akshare（baostock 不支持期货）
+      crypto: [ccxt]
+
+symbols:
+  - {symbol: AAPL, name: Apple, asset_type: stock, source: yfinance}
+  - {symbol: MSFT, name: Microsoft, asset_type: stock, source: yfinance}
+  - {symbol: SPY, name: SPDR S&P 500 ETF, asset_type: etf, source: yfinance}
+  - {symbol: 000001.SZ, name: 平安银行, asset_type: stock, source: baostock}
+  - {symbol: 600519.SH, name: 贵州茅台, asset_type: stock, source: baostock}
+  - {symbol: 000300.SH, name: 沪深300, asset_type: index, source: baostock}
+  - {symbol: 510300.SH, name: 沪深300ETF, asset_type: etf, source: baostock}
+  - {symbol: BTC/USDT, name: Bitcoin, asset_type: crypto, source: ccxt}
+  - {symbol: ETH/USDT, name: Ethereum, asset_type: crypto, source: ccxt}
+
+llm:
+  base_url: https://api.deepseek.com
+  api_key: ""              # 建议用 .env 的 LLM_API_KEY
+  model: deepseek-chat     # deepseek-chat(V3) | deepseek-reasoner(R1)
+  timeout_seconds: 60
+  max_retries: 3
+  temperature: 0.2
