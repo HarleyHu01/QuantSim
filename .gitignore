@@ -5,12 +5,21 @@ __pycache__/
 .pytest_cache/
 
 # 数据与配置（运行时生成 / 本地密钥）
-data/
+/data/
 .tmp/
 .pipcache/
 .tooling/
 .env
 
+# 本机覆盖配置（含这台机器的数据目录/端口/代理等，
+# 由「系统设置 → 存储与路径」写入，随软件分发时不应带上）
+/config/user.yaml
+
 # 前端（后续）
 node_modules/
 web/dist/
+
+# 运行时日志（含本地路径，不入库）
+api.log
+streamlit.log
+

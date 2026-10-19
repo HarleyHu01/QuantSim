@@ -1,0 +1,26 @@
+# Kronos K 线预测模型（可选功能）
+#
+# 用途：为「Kronos 预测策略」提供基于 K 线语言模型的未来走势预测。
+# 不安装不影响系统其他功能：alpha.models.available() 返回 False，
+# 「AI 策略 →Kronos 预测」页面会显示安装命令，内置策略里 kronos_forecast 会明确报缺依赖。
+#
+# 体积提示：torch CPU 轮子约 200 MB+。有 NVIDIA 显卡想用 GPU 推理时，
+# 把下面的 index-url 换成 https://download.pytorch.org/whl/cu124（按 CUDA 版本调整）。
+#
+# 安装：
+#   pip install -r requirements-ml.txt
+#
+# 首次推理会自动从 HuggingFace 下载权重（Kronos-small 约 100 MB，之后走本地缓存）：
+#   NeoQuasar/Kronos-small + NeoQuasar/Kronos-Tokenizer-base
+# 国内网络可先设置镜像：
+#   set HF_ENDPOINT=https://hf-mirror.com
+#
+# 模型规模（越大越准也越慢，CPU 上 Small 单次预测约 0.7 秒）：
+#   Kronos-mini   4.1M 参数，上下文 2048 根
+#   Kronos-small  24.7M 参数，上下文 512 根（默认）
+#   Kronos-base   102.3M 参数，上下文 512 根
+torch>=2.4
+einops>=0.8
+safetensors>=0.4
+huggingface_hub>=0.24
+tqdm>=4.66

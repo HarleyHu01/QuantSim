@@ -229,22 +229,40 @@ class StrategiesRepo:
     def upsert(self, key: str, name: str = "", description: str = "",
                strategy_type: str = "builtin", class_name: str = "",
                config_json: dict | None = None, enabled: int = 1,
-               weight: float = 100.0) -> int:
+               weight: float = 100.0, source_code: str | None = None) -> int:
+        """插入或更新策略。source_code=None 表示不改动已存的源码。"""
+        cfg = json.dumps(config_json or {}, ensure_ascii=False)
         with get_conn(self.db_path) as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO strategies(key, name, description, strategy_type, class_name,
-                                       config_json, enabled, weight, updated_at)
-                VALUES(?,?,?,?,?,?,?,?, datetime('now'))
-                ON CONFLICT(key) DO UPDATE SET
-                  name=excluded.name, description=excluded.description,
-                  strategy_type=excluded.strategy_type, class_name=excluded.class_name,
-                  config_json=excluded.config_json, enabled=excluded.enabled,
-                  weight=excluded.weight, updated_at=datetime('now')
-                """,
-                (key, name, description, strategy_type, class_name,
-                 json.dumps(config_json or {}, ensure_ascii=False), enabled, weight),
-            )
+            if source_code is None:
+                cur = conn.execute(
+                    """
+                    INSERT INTO strategies(key, name, description, strategy_type, class_name,
+                                           config_json, enabled, weight, updated_at)
+                    VALUES(?,?,?,?,?,?,?,?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET
+                      name=excluded.name, description=excluded.description,
+                      strategy_type=excluded.strategy_type, class_name=excluded.class_name,
+                      config_json=excluded.config_json, enabled=excluded.enabled,
+                      weight=excluded.weight, updated_at=datetime('now')
+                    """,
+                    (key, name, description, strategy_type, class_name, cfg, enabled, weight),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO strategies(key, name, description, strategy_type, class_name,
+                                           config_json, enabled, weight, source_code, updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET
+                      name=excluded.name, description=excluded.description,
+                      strategy_type=excluded.strategy_type, class_name=excluded.class_name,
+                      config_json=excluded.config_json, enabled=excluded.enabled,
+                      weight=excluded.weight, source_code=excluded.source_code,
+                      updated_at=datetime('now')
+                    """,
+                    (key, name, description, strategy_type, class_name, cfg, enabled,
+                     weight, source_code),
+                )
             return int(cur.lastrowid)
 
     def get(self, key: str) -> dict[str, Any] | None:
@@ -263,11 +281,22 @@ class StrategiesRepo:
         return [dict(r) for r in rows]
 
     def update(self, strategy_id: int, config_json: dict | None = None,
-               enabled: int | None = None, weight: float | None = None) -> None:
+               enabled: int | None = None, weight: float | None = None,
+               source_code: str | None = None, name: str | None = None,
+               description: str | None = None) -> None:
         sets, vals = [], []
         if config_json is not None:
             sets.append("config_json = ?")
             vals.append(json.dumps(config_json, ensure_ascii=False))
+        if source_code is not None:
+            sets.append("source_code = ?")
+            vals.append(source_code)
+        if name is not None:
+            sets.append("name = ?")
+            vals.append(name)
+        if description is not None:
+            sets.append("description = ?")
+            vals.append(description)
         if enabled is not None:
             sets.append("enabled = ?")
             vals.append(int(enabled))
@@ -313,6 +342,41 @@ class PortfolioRepo:
                 (mode, json.dumps(weights, ensure_ascii=False), rebalance_freq, signal_threshold),
             )
         return self.get()
+
+
+class KVRepo:
+    """通用键值配置（kv_store 表）。
+
+    用于「新增的、还在迭代的」配置项（如模型集成权重、硬性风控阈值），
+    不必每加一个功能就改 app_settings 的列结构。
+    """
+
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        with get_conn(self.db_path) as conn:
+            row = conn.execute("SELECT value_json FROM kv_store WHERE key = ?", (key,)).fetchone()
+        if row is None or row["value_json"] is None:
+            return default
+        try:
+            return json.loads(row["value_json"])
+        except json.JSONDecodeError:
+            return default
+
+    def put(self, key: str, value: Any) -> None:
+        with get_conn(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO kv_store(key, value_json) VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json
+                """,
+                (key, json.dumps(value, ensure_ascii=False)),
+            )
+
+    def delete(self, key: str) -> None:
+        with get_conn(self.db_path) as conn:
+            conn.execute("DELETE FROM kv_store WHERE key = ?", (key,))
 
 
 class SettingsRepo:
@@ -498,3 +562,139 @@ class PaperRepo:
     def clear_pending(self, account_id: int) -> None:
         with get_conn(self.db_path) as conn:
             conn.execute("DELETE FROM paper_pending_orders WHERE account_id = ?", (account_id,))
+
+
+class LLMRepo:
+    """大模型对话与审计（llm_sessions / llm_messages / llm_prompts）。"""
+
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+
+    # ---- 会话 ----
+    def create_session(self, title: str = "新对话", mode: str = "code",
+                       strategy_id: int | None = None) -> dict[str, Any]:
+        with get_conn(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO llm_sessions(title, mode, strategy_id, updated_at)"
+                " VALUES(?,?,?, datetime('now'))",
+                (title or "新对话", mode or "code", strategy_id))
+            sid = int(cur.lastrowid)
+        return self.get_session(sid) or {}
+
+    def get_session(self, session_id: int) -> dict[str, Any] | None:
+        with get_conn(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM llm_sessions WHERE id = ?",
+                               (session_id,)).fetchone()
+        return _row_to_dict(row)
+
+    def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+        with get_conn(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT s.*, (SELECT COUNT(*) FROM llm_messages m WHERE m.session_id = s.id)"
+                " AS message_count FROM llm_sessions s"
+                " ORDER BY COALESCE(s.updated_at, s.created_at) DESC LIMIT ?",
+                (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_session(self, session_id: int, title: str | None = None,
+                       mode: str | None = None,
+                       strategy_id: int | None = None) -> None:
+        sets, vals = [], []
+        if title is not None:
+            sets.append("title = ?")
+            vals.append(title)
+        if mode is not None:
+            sets.append("mode = ?")
+            vals.append(mode)
+        if strategy_id is not None:
+            sets.append("strategy_id = ?")
+            vals.append(int(strategy_id))
+        if not sets:
+            return
+        sets.append("updated_at = datetime('now')")
+        vals.append(session_id)
+        with get_conn(self.db_path) as conn:
+            conn.execute(f"UPDATE llm_sessions SET {', '.join(sets)} WHERE id = ?", vals)
+
+    def touch_session(self, session_id: int) -> None:
+        with get_conn(self.db_path) as conn:
+            conn.execute("UPDATE llm_sessions SET updated_at = datetime('now') WHERE id = ?",
+                         (session_id,))
+
+    def delete_session(self, session_id: int) -> None:
+        with get_conn(self.db_path) as conn:
+            conn.execute("DELETE FROM llm_messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM llm_sessions WHERE id = ?", (session_id,))
+
+    # ---- 消息 ----
+    def add_message(self, session_id: int, role: str, content: str = "",
+                    code: str = "", meta: dict | None = None) -> dict[str, Any]:
+        with get_conn(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO llm_messages(session_id, role, content, code, meta_json)"
+                " VALUES(?,?,?,?,?)",
+                (session_id, role, content or "", code or "",
+                 json.dumps(meta or {}, ensure_ascii=False)))
+            mid = int(cur.lastrowid)
+            conn.execute("UPDATE llm_sessions SET updated_at = datetime('now') WHERE id = ?",
+                         (session_id,))
+        return self.get_message(mid) or {}
+
+    def get_message(self, message_id: int) -> dict[str, Any] | None:
+        with get_conn(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM llm_messages WHERE id = ?",
+                               (message_id,)).fetchone()
+        return _msg_row(row)
+
+    def list_messages(self, session_id: int) -> list[dict[str, Any]]:
+        with get_conn(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM llm_messages WHERE session_id = ? ORDER BY id",
+                (session_id,)).fetchall()
+        return [_msg_row(r) for r in rows if r is not None]
+
+    def update_message(self, message_id: int, content: str | None = None,
+                       code: str | None = None, meta: dict | None = None) -> None:
+        sets, vals = [], []
+        if content is not None:
+            sets.append("content = ?")
+            vals.append(content)
+        if code is not None:
+            sets.append("code = ?")
+            vals.append(code)
+        if meta is not None:
+            sets.append("meta_json = ?")
+            vals.append(json.dumps(meta, ensure_ascii=False))
+        if not sets:
+            return
+        vals.append(message_id)
+        with get_conn(self.db_path) as conn:
+            conn.execute(f"UPDATE llm_messages SET {', '.join(sets)} WHERE id = ?", vals)
+
+    # ---- 审计 ----
+    def log_prompt(self, prompt: str, model: str = "", strategy_id: int | None = None,
+                   mode: str = "code", ok: int = 1, detail: str = "") -> int:
+        with get_conn(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO llm_prompts(prompt, strategy_id, model, mode, ok, detail)"
+                " VALUES(?,?,?,?,?,?)",
+                (prompt, strategy_id, model, mode, int(ok), detail or ""))
+            return int(cur.lastrowid)
+
+    def list_prompts(self, limit: int = 50) -> list[dict[str, Any]]:
+        with get_conn(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM llm_prompts ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _msg_row(row) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    d = dict(row)
+    try:
+        d["meta"] = json.loads(d.get("meta_json") or "{}")
+    except Exception:  # noqa: BLE001
+        d["meta"] = {}
+    d.pop("meta_json", None)
+    return d

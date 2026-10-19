@@ -1,6 +1,6 @@
 # QuantSim 完整示例配置（带注释）
-# 使用：复制为 config/custom.yaml 或直接修改 default.yaml
-# 优先级：代码默认值 < default.yaml < custom.yaml（若支持）< 环境变量（.env）
+# 使用：复制为 config/custom.yaml，或直接修改 default.yaml
+# 优先级：代码默认值 < default.yaml < 环境变量（.env）
 # ---------------------------------------------------------------------------
 
 log_level: INFO          # DEBUG | INFO | WARNING | ERROR
@@ -13,49 +13,40 @@ data:
   display_timezone: null  # UI 展示时区；null = 使用本机时区；可指定 Asia/Shanghai
   adjust: qfq             # A股复权：qfq 前复权 | hfq 后复权 | none 不复权
   lookback_days: 730      # 首次拉取/全量重刷的历史天数
-  incremental: true       # 默认增量更新（按最后 bar 续拉，含 2 根重叠去重）
-  default_timeframes: ["1d"]   # 一键更新的默认周期（1m/5m/15m/30m/1h/2h/4h/1d/1w/1M）
-                             # 注意：baostock 支持 5m/15m/30m/60m(1h)/1d/1w/1M，不支持 1m/2h/4h
+  incremental: true       # 默认增量更新（按最后 bar 续拉，含少量重叠去重）
+  default_timeframes: ["1d"]   # 一键更新的默认周期
+                               # 可选：1m / 5m / 15m / 30m / 1h / 1d / 1w / 1M
+                               # （2h、4h 已移除：Yahoo/baostock/akshare/腾讯 均不提供该粒度）
 
-  # ---- 代理与网络 ----
-  akshare_use_proxy: false   # akshare（A股备用源/期货，东方财富等国内源）禁用系统代理直连；
-                             #   系统代理（如 Clash）会拦截国内域名导致失败。
-                             #   你的网络必须走代理才能访问国内源时改为 true。
-                             #   baostock 经官方客户端 TCP 直连服务器，不受 HTTP 代理影响。
-  ccxt_exchanges: [okx, bitget, gateio, binance, bybit, kucoin]
-                             # 加密货币交易所 fallback 链（逐个尝试，命中即缓存）。
-                             # 国内网络/代理对不同交易所可达性不同，按需调整，
-                             # 如 [okx, gateio, huobi] 或 [binance, kucoin, kraken]。
-  ccxt_timeout_ms: 5000      # 单交易所请求超时（毫秒）；健康检查另有 5s 总预算
+  # ---- 网络 ----
+  akshare_use_proxy: false   # 兼容开关。当前实现不改写进程级代理环境变量：
+                             #   本机实测「禁用系统代理」反而会让东财 RemoteDisconnected，
+                             #   所以默认保持 requests 的系统代理行为。baostock 走 TCP 直连不受影响。
 
-  # ---- 数据源优先级（失败/不健康自动切下一个） ----
+  # ---- 三个下载渠道（按顺序逐级尝试：前一个失败/不支持才换下一个） ----
+  #   腾讯是最后一级兜底，不要把它插到前面，否则会退化成「每个源都拉一遍」。
   providers:
-    priority:
-      stock:  [baostock, akshare, yfinance]   # A股股票：baostock 主源（官方客户端直连）→
-                                              #   akshare（内部东财→腾讯→新浪三通道）→ yfinance 兜底。
-                                              #   美股等非 A股代码在 baostock/akshare 处快速校验失败后
-                                              #   落到 yfinance；纯美股用户可改 [yfinance]。
-      etf:    [baostock, akshare, yfinance]   # A股 ETF：baostock（数据自 2026-01-05 至今）→
-                                              #   akshare → yfinance
-      index:  [baostock, akshare, yfinance]   # 指数：baostock 日/周/月线（2006-01-01 至今），
-                                              #   无分钟线；分钟线需求自动走 akshare/yfinance
-      future: [akshare, yfinance]             # 期货：仅 akshare（baostock 不支持期货）
-      crypto: [ccxt]
+    stock:  [baostock, akshare, tencent]   # A股股票：baostock（主，官方客户端直连）
+                                           #   → akshare（备选，东方财富单通道，失败即交给腾讯）
+                                           #   → tencent（兜底，仅前两者都拿不到时）
+    etf:    [baostock, akshare, tencent]   # A股 ETF：同上
+    index:  [baostock, akshare, tencent]   # 指数：baostock 只有日/周/月线（无分钟线），
+                                           #   请求分钟周期时会自动跳过它、直接走 akshare
+    us_stock: [yfinance]                   # 美股/海外 ETF：Yahoo（yfinance）
 
 # ================= 标的池 =================
 symbols:
-  - {symbol: AAPL, name: Apple, asset_type: stock, source: yfinance}
-  - {symbol: MSFT, name: Microsoft, asset_type: stock, source: yfinance}
-  - {symbol: SPY, name: SPDR S&P 500 ETF, asset_type: etf, source: yfinance}
-  - {symbol: 000001.SZ, name: 平安银行, asset_type: stock, source: baostock}
-  - {symbol: 600519.SH, name: 贵州茅台, asset_type: stock, source: baostock}
-  - {symbol: 000300.SH, name: 沪深300, asset_type: index, source: baostock}
-  - {symbol: 510300.SH, name: 沪深300ETF, asset_type: etf, source: baostock}
-  - {symbol: BTC/USDT, name: Bitcoin, asset_type: crypto, source: ccxt}
-  - {symbol: ETH/USDT, name: Ethereum, asset_type: crypto, source: ccxt}
+  - {symbol: AAPL,       name: Apple,            asset_type: stock, source: yfinance}
+  - {symbol: MSFT,       name: Microsoft,        asset_type: stock, source: yfinance}
+  - {symbol: SPY,        name: SPDR S&P 500 ETF, asset_type: etf,   source: yfinance}
+  - {symbol: 000001.SZ,  name: 平安银行,          asset_type: stock, source: baostock}
+  - {symbol: 600519.SH,  name: 贵州茅台,          asset_type: stock, source: baostock}
+  - {symbol: 000300.SH,  name: 沪深300,           asset_type: index, source: baostock}
+  - {symbol: 510300.SH,  name: 沪深300ETF,        asset_type: etf,   source: baostock}
   # 备注：UI 数据管理页可随时添加/删除标的（POST /api/data/symbols，自动推断类型）
+  # 已移除加密货币（ccxt）支持：含 "/" 的代码（如 BTC/USDT）不再被识别。
 
-# ================= LLM（预留，未启用） =================
+# ================= LLM（AI 策略生成） =================
 llm:
   base_url: https://api.deepseek.com
   api_key: ""              # 建议用 .env 的 LLM_API_KEY（不写进 yaml）
@@ -63,5 +54,23 @@ llm:
   timeout_seconds: 60
   max_retries: 3
   temperature: 0.2
-  # 说明：策略创建页目前为手动表单；LLM 生成接口已预留（quant/strategies/llm/），
-  #       未来接入时只需实现生成器，配置此处的 api_key 即可。
+  # 说明：也可在 UI「交易设置 → 大模型设置」里填写，改完即时生效；
+  #       任何 OpenAI 兼容接口（OpenAI/通义/GLM/Moonshot/本地 Ollama…）改 base_url + model 即可。
+
+# ================= 机器学习（Kronos 预测，可选） =================
+# 需要先安装额外依赖：pip install -r requirements-ml.txt
+# 首次推理会自动下载权重（Kronos-small 约 100MB），之后走本地缓存。
+ml:
+  kronos:
+    enabled: true            # false = 完全停用 Kronos（页面提示未启用）
+    model: Kronos-small      # Kronos-mini(4.1M, 上下文 2048)
+                             # Kronos-small(24.7M, 上下文 512)  ← CPU 上约 0.7 秒/次，推荐
+                             # Kronos-base(102.3M, 上下文 512)   ← 更准但慢 3~4 倍
+    tokenizer: ""             # 留空按 model 自动配对（mini→2k，其余→base）
+    device: auto             # auto（有 CUDA 用 GPU，否则 CPU）| cpu | cuda:0 | mps
+    max_context: 512         # 喂给模型的上下文上限，超过会被截断
+    pred_len: 12             # 一次预测未来多少根 K 线
+    temperature: 1.0         # 采样温度：越低越保守平缓，越高波动越大
+    top_p: 0.9               # 核采样阈值
+    sample_count: 1          # 采样次数，>1 时取多路径均值（更稳，耗时线性增加）
+    tz: Asia/Shanghai        # 计算 时/分/周/月 时间特征用的时区，必须与数据市场一致

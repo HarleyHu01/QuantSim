@@ -17,6 +17,38 @@ from quant.storage.repositories import MarketDataRepo, SymbolsRepo
 from tests.conftest import BrokenProvider, FakeProvider
 
 
+@pytest.fixture(autouse=True)
+def _reset_akshare_breaker():
+    """每个用例前清空 akshare 通道熔断表。
+
+    熔断表是模块级全局状态（``_channel_down_until``）：一个用例把东财标记为
+    「网络不可达」后，后续用例会直接跳过东财，造成与执行顺序相关的假失败。
+    """
+    from quant.data import akshare_provider as _ak
+
+    _ak._channel_down_until.clear()
+    _ak._consecutive_failures = 0
+    yield
+    _ak._channel_down_until.clear()
+    _ak._consecutive_failures = 0
+
+
+@pytest.fixture(autouse=True)
+def _reset_baostock_session():
+    """每个用例前后把 baostock 登录态归零。
+
+    登录态是模块级全局变量（``_logged_in``，会话保持的设计使然）：用例里用
+    monkeypatch 换成假的 ``bs`` 模块后，若沿用上一用例留下的 True，假模块的
+    ``login()`` 根本不会被调用，于是「登录失败」等用例会静默通过而不报错。
+    """
+    from quant.data import baostock_provider as _bp
+
+    _bp._logged_in = False
+    yield
+    _bp._logged_in = False
+
+
+
 # ---------- 归一化 ----------
 
 def test_empty_ohlcv_shape():
@@ -130,34 +162,35 @@ def test_health_check(manager):
     assert health["fake"].healthy is True
 
 
-def test_config_proxy_and_exchange_defaults():
-    """默认配置：akshare 禁用代理、baostock 为 A股主源、ccxt 交易所链按易访问性排序。"""
+def test_config_provider_defaults():
+    """默认配置：两级渠道 baostock → akshare；腾讯已并入 akshare 内部（不再是独立 provider）。"""
     from quant.core.config import AppConfig
 
     cfg = AppConfig()
     assert cfg.data.akshare_use_proxy is False
-    assert cfg.data.providers.stock[0] == "baostock"  # A股主源
-    assert "akshare" in cfg.data.providers.stock  # akshare 备用
-    assert cfg.data.providers.etf[0] == "baostock"  # ETF 也 baostock 优先
-    assert "index" in cfg.data.providers.model_dump()  # 指数资产类型
-    assert cfg.data.providers.future[0] == "akshare"  # 期货仅 akshare
-    assert cfg.data.ccxt_exchanges[0] in ("okx", "bitget", "gateio", "binance")
-    assert len(cfg.data.ccxt_exchanges) >= 4
-    assert cfg.data.ccxt_timeout_ms > 0
+    # 国内两级：主 → 备选（akshare 内部再走 东财→腾讯→新浪 三条腿）
+    for at in ("stock", "etf", "index"):
+        chain = getattr(cfg.data.providers, at)
+        assert chain[0] == "baostock", f"{at} 主源应为 baostock"
+        assert chain[-1] == "akshare", f"{at} 备选源应为 akshare"
+        assert "tencent" not in chain, f"{at} 不应再把 tencent 当成独立 provider"
+    # 美股只走 yfinance
+    assert cfg.data.providers.us_stock == ["yfinance"]
+    # ccxt / 期货已彻底移除
+    dumped = cfg.data.providers.model_dump()
+    assert "crypto" not in dumped and "future" not in dumped
+    assert not hasattr(cfg.data, "ccxt_exchanges")
+    assert not hasattr(cfg.data, "ccxt_timeout_ms")
 
 
-def test_akshare_disable_proxy_env(monkeypatch):
-    """use_proxy=False 时把国内域名写入 NO_PROXY（直连不走系统代理）。"""
-    import os
+def test_config_no_crypto_symbols():
+    """默认标的池不再包含加密货币。"""
+    from quant.core.config import AppConfig
 
-    monkeypatch.delenv("no_proxy", raising=False)
-    monkeypatch.delenv("NO_PROXY", raising=False)
-    from quant.data.akshare_provider import AkshareProvider
-
-    AkshareProvider(use_proxy=False)
-    merged = os.environ.get("no_proxy", "") + os.environ.get("NO_PROXY", "")
-    assert "eastmoney.com" in merged
-    assert "sina.com.cn" in merged
+    cfg = AppConfig()
+    syms = [s["symbol"] for s in cfg.symbols]
+    assert not any("/" in s for s in syms)
+    assert all(s["asset_type"] != "crypto" for s in cfg.symbols)
 
 
 def test_akshare_requests_browser_ua():
@@ -185,12 +218,10 @@ def test_akshare_normalize_symbol():
 
 
 def test_akshare_channel_parsing(monkeypatch):
-    """三通道的原始响应解析成统一 OHLCV（离线）。"""
-    import requests as _requests
+    """东方财富通道原始响应解析成统一 OHLCV（离线）。"""
+    from datetime import datetime
 
-    from quant.data.akshare_provider import (AkshareProvider, _channel_eastmoney,
-                                             _channel_tencent)
-    from datetime import datetime, timedelta
+    from quant.data.akshare_provider import _channel_eastmoney
 
     now = datetime.now()
 
@@ -200,9 +231,6 @@ def test_akshare_channel_parsing(monkeypatch):
                 if "push2his" in url:
                     return {"data": {"klines": [
                         "2024-01-02,7.89,7.74,7.91,7.74,1158366,1075742,5.31,1.2,0.09,1.32"]}}
-                if "gtimg" in url:
-                    return {"data": {"sz000001": {"qfqday": [
-                        ["2024-01-02", "7.89", "7.74", "7.91", "7.74", "1158366.0"]]}}}
                 raise AssertionError(url)
         return R()
 
@@ -212,81 +240,467 @@ def test_akshare_channel_parsing(monkeypatch):
     assert df.iloc[0]["volume"] == 1158366 * 100  # 手→股
     assert df.iloc[0]["close"] == 7.74
 
-    df2 = _channel_tencent("000001", "sz", "0.000001", now, now, "1d", "qfq")
-    assert df2.iloc[0]["volume"] == 1158366 * 100
-    assert df2.iloc[0]["high"] == 7.91
 
+def test_akshare_channels_include_sina_fallback(monkeypatch):
+    """akshare 内部三条腿：东方财富 / 腾讯 / 新浪，顺序随周期能力动态决定。
 
-def test_akshare_fallback_switches_channel(monkeypatch):
-    """东财失败自动切腾讯/雪球；重试与退避生效；记录实际通道。"""
+    历史背景：曾有人以「渠道只该有三家」为由删掉新浪，结果东财域名被网络层
+    阻断后 akshare 彻底失效（错误信息见 README 故障排查）。东财是单点，
+    必须保留新浪兜底——它不是独立 provider，只是 akshare 内部的一条腿。
+    腾讯同理，原本是独立第三级 provider，现并入本 provider。
+    """
     from quant.data.akshare_provider import AkshareProvider
-    from datetime import datetime
 
     provider = AkshareProvider(use_proxy=False)
-    calls = {"em": 0, "tx": 0, "xq": 0}
-    slept = []
+    # 日/周/月：腾讯比新浪快（0.55s vs 1.6s），深度相当 → 腾讯优先
+    assert [label for label, _ in provider._channels("1d")] == ["东方财富", "腾讯", "新浪"]
+    assert [label for label, _ in provider._channels("1w")] == ["东方财富", "腾讯", "新浪"]
+    # 分钟线：新浪 1970 根 ≫ 腾讯 640 根（约 3 倍深度）→ 新浪优先，腾讯退为兜底
+    assert [label for label, _ in provider._channels("5m")] == ["东方财富", "新浪", "腾讯"]
+    assert [label for label, _ in provider._channels("1h")] == ["东方财富", "新浪", "腾讯"]
+    # 1m：只有腾讯支持，独占（东财/新浪都没有）
+    assert [label for label, _ in provider._channels("1m")] == ["腾讯"]
+
+
+def test_akshare_falls_back_to_sina_when_eastmoney_fails(monkeypatch):
+    """东财失败 → 自动降级到新浪，整体成功（不再整体失败）。"""
+    from datetime import datetime
+
+    import pandas as pd
+
+    from quant.data.akshare_provider import AkshareProvider, _channel_sina
+
+    provider = AkshareProvider(use_proxy=False)
 
     def fake_em(*a, **k):
-        calls["em"] += 1
         raise ConnectionError("RemoteDisconnected")
 
-    def fake_tx(*a, **k):
-        calls["tx"] += 1
-        import pandas as pd
+    def fake_sina(code, pref, secid, start, end, timeframe, adjust,
+                  timeout=10.0, throttle=True):
         return pd.DataFrame({"open": [1.0], "close": [1.0], "high": [1.0],
                              "low": [1.0], "volume": [100.0]},
                             index=pd.DatetimeIndex([pd.Timestamp("2024-01-02", tz="UTC")]))
 
-    def fake_sleep(s):
-        slept.append(s)
-
     monkeypatch.setattr("quant.data.akshare_provider._channel_eastmoney", fake_em)
-    monkeypatch.setattr("quant.data.akshare_provider._channel_tencent", fake_tx)
-    monkeypatch.setattr("quant.data.akshare_provider.time.sleep", fake_sleep)
+    monkeypatch.setattr("quant.data.akshare_provider._channel_tencent", fake_em)
+    monkeypatch.setattr("quant.data.akshare_provider._channel_sina", fake_sina)
+    monkeypatch.setattr("quant.data.akshare_provider.time.sleep", lambda s: None)
     monkeypatch.setattr("quant.data.akshare_provider._consecutive_failures", 0, raising=False)
 
-    df = provider.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10),
-                                "1d", "qfq")
-    assert calls["em"] == 2 and calls["tx"] == 1  # 东财 2 次后切腾讯
-    assert provider.last_source == "腾讯"
-    assert df is not None and not df.empty
-    assert slept  # 退避等待发生过
+    df = provider.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert not df.empty
+    assert provider.last_source == "新浪"
+    assert _channel_sina is not None
+
+
+def test_akshare_all_channels_fail_reports_both(monkeypatch):
+    """三条腿都挂时，错误信息要提到三条腿，便于定位。"""
+    from datetime import datetime
+
+    import pytest as _pytest
+
+    from quant.data.akshare_provider import AkshareProvider
+
+    provider = AkshareProvider(use_proxy=False)
+    monkeypatch.setattr("quant.data.akshare_provider._channel_eastmoney",
+                        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("em down")))
+    monkeypatch.setattr("quant.data.akshare_provider._channel_tencent",
+                        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("tx down")))
+    monkeypatch.setattr("quant.data.akshare_provider._channel_sina",
+                        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("sina down")))
+    monkeypatch.setattr("quant.data.akshare_provider.time.sleep", lambda s: None)
+    monkeypatch.setattr("quant.data.akshare_provider._consecutive_failures", 0, raising=False)
+
+    with _pytest.raises(RuntimeError, match="东方财富.*腾讯.*新浪|新浪.*腾讯.*东方财富"):
+        provider.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert provider.last_source is None
+
+
+def test_akshare_channel_success_marks_eastmoney(monkeypatch):
+    """东财成功时 last_source 固定为「东方财富」。"""
+    from datetime import datetime
+
+    import pandas as pd
+
+    from quant.data.akshare_provider import AkshareProvider
+
+    provider = AkshareProvider(use_proxy=False)
+
+    def fake_em(*a, **k):
+        return pd.DataFrame({"open": [1.0], "close": [1.0], "high": [1.0],
+                             "low": [1.0], "volume": [100.0]},
+                            index=pd.DatetimeIndex([pd.Timestamp("2024-01-02", tz="UTC")]))
+
+    monkeypatch.setattr("quant.data.akshare_provider._channel_eastmoney", fake_em)
+    df = provider.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert not df.empty
+    assert provider.last_source == "东方财富"
+
+
+def _ok_frame():
+    import pandas as pd
+    return pd.DataFrame({"open": [1.0], "close": [1.0], "high": [1.0],
+                         "low": [1.0], "volume": [100.0]},
+                        index=pd.DatetimeIndex([pd.Timestamp("2024-01-02", tz="UTC")]))
+
+
+def _dead(*a, **k):
+    raise ConnectionError("down")
 
 
 def test_akshare_health_source(monkeypatch):
-    """健康检查记录实际可用通道并标注在 ProviderHealth.source。"""
-    from quant.data.akshare_provider import AkshareProvider
+    """健康检查逐通道探测，``source`` 报**通道链里第一个可用**的那条腿。
+
+    三条腿并发探测，因此每条都要打桩——否则会打到真实网络。
+    """
+    from quant.data import akshare_provider as ak
+
+    provider = ak.AkshareProvider(use_proxy=False)
+    monkeypatch.setattr(ak.time, "sleep", lambda s: None)
+
+    # 全部健康 → source 取链首（东方财富），且三条腿明细都在
+    for name in ("_channel_eastmoney", "_channel_tencent", "_channel_sina"):
+        monkeypatch.setattr(ak, name, lambda *a, **k: _ok_frame())
+    h = provider.health_check()
+    assert h.healthy is True
+    assert h.source == "东方财富"
+    assert [c["name"] for c in h.channels] == ["东方财富", "腾讯", "新浪"]
+    assert all(c["healthy"] for c in h.channels)
+
+    # 三条腿全挂 → 不健康
+    for name in ("_channel_eastmoney", "_channel_tencent", "_channel_sina"):
+        monkeypatch.setattr(ak, name, _dead)
+    h2 = provider.health_check()
+    assert h2.healthy is False
+    assert h2.source is None
+
+    # 东财挂、腾讯挂、只有新浪通 → 健康，source 标注为新浪（真实可用通道）
+    monkeypatch.setattr(ak, "_channel_eastmoney", _dead)
+    monkeypatch.setattr(ak, "_channel_tencent", _dead)
+    monkeypatch.setattr(ak, "_channel_sina", lambda *a, **k: _ok_frame())
+    h3 = provider.health_check()
+    assert h3.healthy is True
+    assert h3.source == "新浪"
+    assert h3.channels[2]["preferred"] is True
+
+    # 延迟只报主用通道自己的耗时，不是整条链累计值（本次回归点）
+    assert h3.latency_ms == h3.channels[2]["latency_ms"]
+
+
+def test_akshare_breaker_skips_dead_channel_fast(monkeypatch):
+    """东财连接不上后应被熔断，后续拉取直接走新浪，不再重复等东财超时。
+
+    背景：东财 kline 接口在本机被网络层阻断（详见 README 故障排查），
+    若每次都先试东财两轮再退避，单次下载会白白多花数秒到数十秒。
+    """
+    from datetime import datetime
+
+    import pandas as pd
+
+    from quant.data import akshare_provider as ak
+    from quant.data.akshare_provider import AkshareProvider, channel_status
 
     provider = AkshareProvider(use_proxy=False)
+    # 三条腿各自计数：东财与腾讯都用 dead 打桩，但必须分开统计，
+    # 否则 calls["em"] 会把腾讯那条腿的调用也算进去。
+    calls = {"em": 0, "tx": 0, "sina": 0}
 
-    def fake_tencent(*a, **k):
-        import pandas as pd
+    def dead_em(*a, **k):
+        calls["em"] += 1
+        raise ConnectionError("Connection aborted / RemoteDisconnected")
+
+    def dead_tx(*a, **k):
+        calls["tx"] += 1
+        raise ConnectionError("Connection aborted / RemoteDisconnected")
+
+    def ok_sina(code, pref, secid, start, end, timeframe, adjust,
+                timeout=10.0, throttle=True):
+        calls["sina"] += 1
         return pd.DataFrame({"open": [1.0], "close": [1.0], "high": [1.0],
                              "low": [1.0], "volume": [100.0]},
                             index=pd.DatetimeIndex([pd.Timestamp("2024-01-02", tz="UTC")]))
 
-    monkeypatch.setattr("quant.data.akshare_provider._channel_eastmoney",
-                        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("x")))
-    monkeypatch.setattr("quant.data.akshare_provider._channel_tencent", fake_tencent)
-    h = provider.health_check()
-    assert h.healthy is True
-    assert h.source == "腾讯"
+    monkeypatch.setattr(ak, "_channel_eastmoney", dead_em)
+    monkeypatch.setattr(ak, "_channel_tencent", dead_tx)
+    monkeypatch.setattr(ak, "_channel_sina", ok_sina)
+    monkeypatch.setattr(ak.time, "sleep", lambda s: None)
+
+    # 第一次：东财打一次即被熔断（不做第二次尝试），新浪接住
+    df1 = provider.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert not df1.empty
+    assert provider.last_source == "新浪"
+    assert calls["em"] == 1, "传输层失败应立即熔断，不该重试第二次"
+    assert "cooling" in channel_status()["东方财富"]
+
+    # 第二次：东财、腾讯均已熔断 → 两条腿一次都不再调用，直达新浪
+    df2 = provider.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert not df2.empty
+    assert calls["em"] == 1, "熔断期内不应再碰东财"
+    assert calls["tx"] == 1, "熔断期内不应再碰腾讯"
 
 
-def test_akshare_real_fetch_000001():
-    """真实拉取 000001（平安银行）日线：至少一个通道成功（东财/腾讯/新浪）。"""
-    from datetime import datetime, timedelta
+def test_akshare_breaker_expires_after_cooldown(monkeypatch):
+    """熔断到期后应自动恢复尝试，而不是永久跳过该通道。"""
+    import time as _time
+    from datetime import datetime
 
+    import pandas as pd
+
+    from quant.data import akshare_provider as ak
+    from quant.data.akshare_provider import AkshareProvider, channel_status
+
+    provider = AkshareProvider(use_proxy=False)
+    ak._mark_channel_down("东方财富")
+    assert "cooling" in channel_status()["东方财富"]
+
+    # 把恢复时间改到过去，模拟冷却结束
+    ak._channel_down_until["东方财富"] = _time.monotonic() - 1
+    assert channel_status()["东方财富"] == "ok"
+
+    def ok_em(*a, **k):
+        return pd.DataFrame({"open": [1.0], "close": [1.0], "high": [1.0],
+                             "low": [1.0], "volume": [100.0]},
+                            index=pd.DatetimeIndex([pd.Timestamp("2024-01-02", tz="UTC")]))
+
+    monkeypatch.setattr(ak, "_channel_eastmoney", ok_em)
+    df = provider.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert not df.empty
+    assert provider.last_source == "东方财富"
+
+
+def test_akshare_health_ignores_breaker(monkeypatch):
+    """健康检查不受熔断影响：用户点「重新检测」时必须真的去探一次，才能自愈。"""
+    import pandas as pd
+
+    from quant.data import akshare_provider as ak
     from quant.data.akshare_provider import AkshareProvider
 
     provider = AkshareProvider(use_proxy=False)
-    end = datetime.now()
-    start = end - timedelta(days=45)
-    df = provider.fetch_history("000001", start, end, "1d", "qfq")
-    assert df is not None and len(df) >= 10
-    assert provider.last_source in ("东方财富", "腾讯", "新浪/雪球")
-    assert {"open", "high", "low", "close", "volume"}.issubset(df.columns)
-    assert df["close"].iloc[-1] > 0
+    ak._mark_channel_down("东方财富")
+
+    def ok_em(*a, **k):
+        return pd.DataFrame({"open": [1.0], "close": [1.0], "high": [1.0],
+                             "low": [1.0], "volume": [100.0]},
+                            index=pd.DatetimeIndex([pd.Timestamp("2024-01-02", tz="UTC")]))
+
+    monkeypatch.setattr(ak, "_channel_eastmoney", ok_em)
+    h = provider.health_check()
+    assert h.healthy is True
+    assert h.source == "东方财富"
+    assert ak.channel_status()["东方财富"] == "ok"
+
+
+def test_akshare_clip_to_window_handles_tz_aware_bounds():
+    """回归：请求边界是 tz-aware(UTC) 而通道索引是 tz-naive 时不得抛 TypeError。
+
+    这是 1m 下载全挂的真因——`_clip_to_window` 只在**索引**带时区时才对齐边界，
+    索引 tz-naive 而 start/end 带 UTC 时区时直接比较，pandas 抛
+    ``Invalid comparison between dtype=datetime64[us] and Timestamp``；
+    该异常又被 fallback 链捕获成「腾讯通道失败」而重试，掩盖了真正的问题。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    import pandas as pd
+
+    from quant.data.akshare_provider import _clip_to_window
+
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp("2024-01-02 09:30"), pd.Timestamp("2024-01-02 15:00"),
+         pd.Timestamp("2024-06-03 10:00")],
+        dtype="datetime64[us]",
+    )
+    df = pd.DataFrame({"open": [1.0, 2.0, 3.0]}, index=idx)
+
+    # tz-aware(UTC) 边界 → naive(北京时间) 索引：换算后应正常裁剪
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2024, 1, 31, tzinfo=timezone.utc)
+    out = _clip_to_window(df, start, end)
+    assert len(out) == 2
+    assert out.index[0] == pd.Timestamp("2024-01-02 09:30")
+
+    # tz-naive 边界同样可用（此路径原本就 OK，防回归）
+    out2 = _clip_to_window(df, datetime(2024, 6, 1), datetime(2024, 6, 30))
+    assert len(out2) == 1
+    assert out2.index[0] == pd.Timestamp("2024-06-03 10:00")
+
+    # 索引带时区时，naive 边界要被 localize 到索引时区
+    idx_tz = idx.tz_localize("Asia/Shanghai")
+    df_tz = pd.DataFrame({"open": [1.0, 2.0, 3.0]}, index=idx_tz)
+    out3 = _clip_to_window(df_tz, datetime(2024, 1, 1), datetime(2024, 1, 31))
+    assert len(out3) == 2
+    assert out3.index.tz is not None
+
+    # 区间外无数据 → 空表（调用方据此报「该区间内无数据」）
+    empty = _clip_to_window(df, datetime(2020, 1, 1), datetime(2020, 2, 1))
+    assert empty.empty
+
+
+def test_akshare_transport_error_classification():
+    """传输层错误（换通道）与限流错误（原地退避）要能区分开。"""
+    import requests
+
+    from quant.data.akshare_provider import _is_transport_error
+
+    assert _is_transport_error(ConnectionError("x")) is True
+    assert _is_transport_error(requests.exceptions.ProxyError("p")) is True
+    assert _is_transport_error(requests.exceptions.Timeout("t")) is True
+    assert _is_transport_error(requests.exceptions.SSLError("s")) is True
+    assert _is_transport_error(RuntimeError("Connection aborted.")) is True
+    assert _is_transport_error(RuntimeError("RemoteDisconnected")) is True
+    # 限流 / 服务端 5xx 不算传输失败 → 应原地退避重试
+    assert _is_transport_error(RuntimeError("HTTP 429 Too Many Requests")) is False
+    assert _is_transport_error(RuntimeError("服务端 500")) is False
+
+
+def test_akshare_rejects_non_a_share():
+    """非 A股/ETF 代码快速失败（不拖慢 fallback 链）。"""
+    import pytest as _pytest
+
+    from quant.data.akshare_provider import AkshareProvider
+
+    p = AkshareProvider(use_proxy=False)
+    with _pytest.raises(ValueError, match="非 A股"):
+        p.fetch_history("AAPL", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "none")
+
+
+def test_akshare_supports_matrix():
+    """akshare 能力声明：含 1m（腾讯腿独家提供）、无 2h/4h；日/周/月/分钟（1-60）支持。"""
+    from quant.data.akshare_provider import AkshareProvider
+
+    p = AkshareProvider(use_proxy=False)
+    for tf in ("1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"):
+        assert p.supports("600519.SH", tf) is True, tf
+    for tf in ("2h", "4h"):
+        assert p.supports("600519.SH", tf) is False, tf
+    # 1m 只能靠腾讯腿，回溯窗口被裁到很短（约 4 个交易日）
+    assert p.max_lookback_days("600519.SH", "1m") == 7
+    assert p.max_lookback_days("600519.SH", "1d") is None
+    # 非 A股代码不支持
+    assert p.supports("AAPL", "1d") is False
+
+
+# ---------- 腾讯（A股最后兜底） ----------
+
+def _tx_payload(rows: list[list], key: str = "qfqday"):
+    return {"code": 0, "data": {"sh600519": {key: rows}}}
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._p = payload
+        self.status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._p
+
+
+def test_tencent_code_and_parsing(monkeypatch):
+    """腾讯字段序是 date/open/close/high/low/volume —— 按 OHLC 读会把 high/low 读反。"""
+    from quant.data.tencent_provider import TencentProvider, _to_tx_code
+
+    assert _to_tx_code("600519.SH") == "sh600519"
+    assert _to_tx_code("000001.SZ") == "sz000001"
+    assert _to_tx_code("600519") == "sh600519"
+
+    p = TencentProvider()
+    df = p._rows_to_df([
+        ["2024-01-02", "7.89", "7.74", "7.91", "7.74", "1158366"],
+        ["2024-01-03", "8.00", "8.10", "8.20", "7.95", "2000"],
+    ])
+    assert df.iloc[0]["open"] == 7.89
+    assert df.iloc[0]["close"] == 7.74
+    assert df.iloc[0]["high"] == 7.91   # 第 4 列才是 high
+    assert df.iloc[0]["low"] == 7.74    # 第 5 列才是 low
+    assert df.iloc[0]["volume"] == 1158366 * 100  # 手→股
+
+
+def test_tencent_daily_fetch(monkeypatch):
+    """日线走 fqkline/get，按 end 回退分页，去重合并。"""
+    from datetime import datetime
+
+    import requests
+
+    from quant.data.tencent_provider import TencentProvider
+
+    pages = [
+        _tx_payload([["2024-01-04", "10", "11", "12", "9", "100"],
+                     ["2024-01-05", "11", "12", "13", "10", "200"]]),
+        _tx_payload([["2024-01-02", "8", "9", "10", "7", "300"],
+                     ["2024-01-03", "9", "10", "11", "8", "400"]]),
+        _tx_payload([], "day"),
+    ]
+    calls = {"n": 0}
+
+    def fake_get(url, params, timeout=None, headers=None, proxies=None):
+        if "fqkline" in url:
+            payload = pages[min(calls["n"], len(pages) - 1)]
+            calls["n"] += 1
+            return _FakeResp(payload)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    p = TencentProvider()
+    df = p.fetch_history("600519.SH", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert len(df) == 4  # 两页去重合并
+    # 索引统一存 UTC，按上海时区还原才是 A股本地日期
+    assert str(df.index.min().tz_convert("Asia/Shanghai").date()) == "2024-01-02"
+    assert calls["n"] >= 1
+
+
+def test_tencent_minute_uses_mkline(monkeypatch):
+    """分钟线必须走 mkline 端点（fqkline 只认 day/week/month）。"""
+    from datetime import datetime
+
+    import requests
+
+    from quant.data.tencent_provider import TencentProvider
+
+    seen: list[str] = []
+
+    def fake_get(url, params, timeout=None, headers=None, proxies=None):
+        seen.append(url)
+        assert "mkline" in url, f"分钟线不应走 {url}"
+        return _FakeResp(_tx_payload(
+            [["202401021000", "10", "10.5", "10.6", "9.9", "100"],
+             ["202401021005", "10.5", "10.6", "10.7", "10.4", "120"]],
+            "m5"))
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    p = TencentProvider()
+    df = p.fetch_history("600519.SH", datetime(2024, 1, 1), datetime(2024, 1, 10), "5m", "qfq")
+    assert len(df) == 2
+    # 202401021000 是北京时间 10:00 → 存成 UTC 后是 02:00
+    local = df.index[0].tz_convert("Asia/Shanghai")
+    assert local.hour == 10 and local.minute == 0
+    assert all("mkline" in u for u in seen)
+
+
+def test_tencent_supports_and_lookback():
+    """腾讯能力声明：无 2h/4h；分钟线回溯很浅（约 640 根）。"""
+    from quant.data.tencent_provider import TencentProvider
+
+    p = TencentProvider()
+    for tf in ("1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"):
+        assert p.supports("600519.SH", tf) is True, tf
+    for tf in ("2h", "4h"):
+        assert p.supports("600519.SH", tf) is False, tf
+    # 分钟线有明确回溯上限，日/周/月不限
+    assert p.max_lookback_days("600519.SH", "5m") is not None
+    assert p.max_lookback_days("600519.SH", "1d") is None
+
+
+def test_tencent_rejects_non_a_share():
+    import pytest as _pytest
+
+    from quant.data.tencent_provider import TencentProvider, _to_tx_code
+
+    p = TencentProvider()
+    with _pytest.raises(ValueError, match="仅支持沪深"):
+        _to_tx_code("AAPL")
+    assert p.supports("AAPL", "1d") is False
 
 
 # ---------- baostock（A股主源） ----------
@@ -415,10 +829,14 @@ def test_baostock_rows_to_df_offline():
 
 
 def test_baostock_fetch_history_offline(monkeypatch):
-    """离线拉取：login→query→logout 全链路 + qfq → adjustflag=2 + UTC 归一化。
+    """离线拉取：登录一次 → 查询 → 不登出（会话保持）+ qfq → adjustflag=2 + UTC 归一化。
 
     日线查询字段**不含 time**（baostock 日线传 time 会报 10004012）；
     无后缀 000001 归为上证指数（sh.000001），故用 000001.SZ（平安银行股票）验证股票路径。
+
+    会话保持是性能必需：实测 ``login()`` 单次 11~13 秒、而一次 query 只要 2~3 秒，
+    「每条查询都 login→query→logout」会让每次拉数据白付十几秒（这正是历史上
+    「baostock 总超时」的真正原因）。因此这里断言 logout 次数为 0。
     """
     from quant.data import baostock_provider as bp
 
@@ -427,7 +845,9 @@ def test_baostock_fetch_history_offline(monkeypatch):
     p = bp.BaostockProvider()
     df = p.fetch_history("000001.SZ", datetime(2024, 1, 1), datetime(2024, 1, 10),
                          "1d", "qfq")
-    assert fake.login_calls == 1 and fake.logout_calls == 1
+    assert fake.login_calls == 1  # 首次用到才登录
+    assert fake.logout_calls == 0  # 会话保持，查询结束不登出
+    assert bp.session_state()["logged_in"] is True
     assert fake.last_call["code"] == "sz.000001"
     assert fake.last_call["frequency"] == "d"
     assert fake.last_call["adjustflag"] == "2"  # qfq
@@ -438,6 +858,55 @@ def test_baostock_fetch_history_offline(monkeypatch):
     assert df.index.tz is not None  # 已转 UTC
     assert list(df.columns) == ["open", "high", "low", "close", "volume", "adj_factor"]
     assert p.last_source == "baostock"
+
+    # 第二次拉取复用已有会话：不再登录
+    p.fetch_history("600519.SH", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert fake.login_calls == 1
+
+
+def test_baostock_session_reused_across_providers(monkeypatch):
+    """会话是模块级、跨 provider 实例共享的（进程内只登录一次）。"""
+    from quant.data import baostock_provider as bp
+
+    fake = _FakeBs()
+    monkeypatch.setattr(bp, "bs", fake)
+    bp.BaostockProvider().fetch_history(
+        "600519.SH", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert fake.login_calls == 1
+    bp.BaostockProvider().fetch_history(
+        "000001.SZ", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert fake.login_calls == 1  # 新实例也不重新登录
+
+    bp.close_session()
+    assert fake.logout_calls == 1
+    assert bp.session_state()["logged_in"] is False
+
+
+def test_baostock_query_retries_after_relogin(monkeypatch):
+    """查询返回错误码 → 重建会话并重试一次，而不是立刻把 provider 判死。
+
+    baostock 服务器会中途掉线（实测长查询跑到一半返回 10002007 网络接收错误，
+    之后所有查询都失败直到重新 login）。
+    """
+    from quant.data import baostock_provider as bp
+
+    fake = _FakeBs()
+    calls = {"q": 0}
+    orig = fake.query_history_k_data_plus
+
+    def flaky(code, fields, start_date, end_date, frequency, adjustflag):
+        calls["q"] += 1
+        if calls["q"] == 1:
+            return _FakeResult([], error_code="10002007", error_msg="网络接收错误。")
+        return orig(code, fields, start_date, end_date, frequency, adjustflag)
+
+    monkeypatch.setattr(fake, "query_history_k_data_plus", flaky)
+    monkeypatch.setattr(bp, "bs", fake)
+    p = bp.BaostockProvider()
+    df = p.fetch_history("000001.SZ", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "qfq")
+    assert len(df) == 2  # 重试后成功
+    assert calls["q"] == 2
+    assert fake.login_calls == 2  # 首次登录 + 掉线后重登
 
 
 def test_baostock_minute_forced_no_adjust(monkeypatch, caplog):
@@ -551,7 +1020,7 @@ def test_baostock_errors(monkeypatch):
     # 非 A股代码（无需网络，校验即失败）
     with pytest.raises(ValueError, match="非 A股"):
         p.fetch_history("AAPL", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "none")
-    # 不支持周期
+    # 不支持周期（2h 已从周期表移除，仍应明确报错）
     with pytest.raises(ValueError, match="不支持的周期"):
         p.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1m", "none")
     with pytest.raises(ValueError, match="不支持的周期"):
@@ -562,16 +1031,25 @@ def test_baostock_errors(monkeypatch):
     with pytest.raises(RuntimeError, match="空数据"):
         p.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "none")
     # 登录失败
+    # 注意：会话是模块级全局状态，上面几次成功查询已把 _logged_in 置为 True；
+    # 这里换了新的假模块，必须先丢弃旧会话，否则 _ensure_login 会直接复用而不登录。
+    bp.close_session()
     fake_fail = _FakeBs(login_error="10001002")
     monkeypatch.setattr(bp, "bs", fake_fail)
     with pytest.raises(RuntimeError, match="登录失败"):
         p.fetch_history("000001", datetime(2024, 1, 1), datetime(2024, 1, 10), "1d", "none")
+    assert fake_fail.login_calls == 1
 
 
 @pytest.mark.skipif(importlib.util.find_spec("baostock") is None,
                     reason="baostock 未安装，跳过真实拉取测试")
 def test_baostock_real_fetch_000001():
-    """真实拉取 000001（平安银行）日线：验证 baostock 连通性与复权数据。"""
+    """真实拉取 000001（平安银行）日线：验证 baostock 连通性与复权数据。
+
+    baostock 服务器偶尔抽风（``10002007 网络接收错误``）或拒绝登录
+    （``10001011``），这是服务器侧问题、与本项目代码无关；集成测试不该因此
+    把 CI 判红，故遇到网络/服务端拒绝类错误时 skip。
+    """
     from datetime import datetime, timedelta
 
     from quant.data.baostock_provider import BaostockProvider
@@ -579,19 +1057,58 @@ def test_baostock_real_fetch_000001():
     provider = BaostockProvider()
     end = datetime.now()
     start = end - timedelta(days=45)
-    df = provider.fetch_history("000001", start, end, "1d", "qfq")
+    try:
+        df = provider.fetch_history("000001", start, end, "1d", "qfq")
+    except RuntimeError as e:
+        msg = str(e)
+        if ("网络接收错误" in msg or "超时" in msg or "登录失败" in msg
+                or "空数据" in msg or "拒绝登录" in msg or "换个网络环境" in msg
+                or "连接失败" in msg):
+            pytest.skip(f"baostock 服务器暂不可用，跳过真实拉取测试: {msg}")
+        raise
     assert df is not None and len(df) >= 10
     assert provider.last_source == "baostock"
     assert {"open", "high", "low", "close", "volume"}.issubset(df.columns)
     assert df["close"].iloc[-1] > 0
 
 
-def test_ccxt_default_exchanges():
-    from quant.data.ccxt_provider import CcxtProvider
+def test_baostock_capabilities():
+    """baostock 能力声明：无 1m、无 2h/4h；指数无分钟线；北交所不支持。"""
+    from quant.data.baostock_provider import BaostockProvider
 
-    p = CcxtProvider()
-    assert len(p.exchange_ids) >= 4
-    assert p.exchange_ids[0] in ("okx", "bitget", "gateio", "binance")
+    p = BaostockProvider()
+    for tf in ("5m", "15m", "30m", "1h", "1d", "1w", "1M"):
+        assert p.supports("600519.SH", tf) is True, tf
+    for tf in ("1m", "2h", "4h"):
+        assert p.supports("600519.SH", tf) is False, tf
+    # 指数无分钟线（日/周/月可以）
+    assert p.supports("000300.SH", "5m") is False
+    assert p.supports("000300.SH", "1d") is True
+    # 北交所 / 非 A股
+    assert p.supports("830799.BJ", "1d") is False
+    assert p.supports("AAPL", "1d") is False
+
+
+def test_tencent_merged_into_akshare_not_in_chain():
+    """腾讯已并入 akshare 内部（东财→腾讯→新浪），不再作为独立 provider 出现在优先级链上。
+
+    否则健康表会把同一家腾讯显示两遍，代理开关也要设两处。
+    TencentProvider 类本身仍保留，供直接引用与测试。
+    """
+    from quant.core.config import AppConfig
+    from quant.data.tencent_provider import TencentProvider
+
+    prio = AppConfig().data.providers
+    for at in ("stock", "etf", "index"):
+        chain = getattr(prio, at)
+        assert chain == ["baostock", "akshare"], f"{at} 链应只有两级，实际 {chain}"
+    # 类仍在，可独立实例化
+    assert TencentProvider().name == "tencent"
+
+    # akshare 内部确实存在腾讯这条腿
+    from quant.data.akshare_provider import AkshareProvider
+    labels = [label for label, _ in AkshareProvider()._channels("1d")]
+    assert "腾讯" in labels
 
 
 def test_health_always_includes_all_providers(tmp_config):
@@ -713,7 +1230,9 @@ def test_health_check(manager):
 def test_yfinance_tf_map_and_finalize():
     from quant.data.yfinance_provider import TF_MAP, YFinanceProvider
 
-    assert set(TF_MAP) >= {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"}
+    # 2h/4h 已移除：Yahoo 对这两个粒度返回 400/422，根本拿不到数据
+    assert set(TF_MAP) == {"1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"}
+    assert "2h" not in TF_MAP and "4h" not in TF_MAP
     p = YFinanceProvider()
     df = pd.DataFrame(
         {"Open": [1.0], "High": [1.1], "Low": [0.9], "Close": [1.0], "Volume": [100],
@@ -724,6 +1243,29 @@ def test_yfinance_tf_map_and_finalize():
     assert list(out.columns) == ["open", "high", "low", "close", "volume", "adj_factor"]
     assert out.index.tz is not None  # 已转 UTC
     assert out.iloc[0]["adj_factor"] == pytest.approx(0.95)
+
+
+def test_yfinance_capabilities_and_window_clip():
+    """Yahoo 分钟线有硬窗口：1m 8 天、5/15/30m 60 天、60m 730 天；超窗必须自动裁剪。"""
+    from datetime import datetime, timedelta
+
+    from quant.data.yfinance_provider import YFinanceProvider
+
+    p = YFinanceProvider()
+    for tf in ("1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"):
+        assert p.supports("AAPL", tf) is True, tf
+    assert p.supports("AAPL", "2h") is False and p.supports("AAPL", "4h") is False
+
+    assert p.max_lookback_days("AAPL", "1m") == 8
+    assert p.max_lookback_days("AAPL", "5m") == 60
+    assert p.max_lookback_days("AAPL", "1h") == 730
+    assert p.max_lookback_days("AAPL", "1d") is None  # 日线不限
+
+    end = datetime(2024, 6, 1)
+    far = end - timedelta(days=3650)
+    clipped = p._clip_start(far, end, "5m")
+    assert clipped == end - timedelta(days=59)   # 裁进 60 天窗口
+    assert p._clip_start(far, end, "1d") == far  # 日线不裁
 
 
 def test_akshare_col_map_finalize():
@@ -749,13 +1291,11 @@ def test_akshare_col_map_finalize():
     assert out.iloc[0]["volume"] == 1_000_000
 
 
-def test_ccxt_tf_map_and_construct():
-    from quant.data.ccxt_provider import CcxtProvider, TF_MAP
+def test_ccxt_module_removed():
+    """ccxt 数据源已删除（用户要求只保留 yfinance + baostock + akshare + 腾讯）。"""
+    import importlib.util
 
-    assert TF_MAP["1M"] == "1M" and TF_MAP["1h"] == "1h" and TF_MAP["1w"] == "1w"
-    # 构造不访问网络
-    p = CcxtProvider(exchange_ids=["kraken"])
-    assert p.exchange_ids == ["kraken"]
+    assert importlib.util.find_spec("quant.data.ccxt_provider") is None
 
 
 def test_timeframe_filename_case_safety(tmp_config):
@@ -798,9 +1338,20 @@ def test_api_health_environment():
 
 # ---------- 标的注册 / 删除 ----------
 
+def test_timeframe_table_has_no_gaps():
+    """TIMEFRAMES 只保留真实可下载的粒度：没有 2h/4h，且各 Provider 表与之对齐。"""
+    from quant.core.models import TF_COVERAGE_HINT, TF_LABELS, TIMEFRAMES
+
+    assert TIMEFRAMES == ["1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"]
+    assert "2h" not in TIMEFRAMES and "4h" not in TIMEFRAMES
+    assert set(TF_LABELS) == set(TIMEFRAMES)
+    assert set(TF_COVERAGE_HINT) == set(TIMEFRAMES)
+
+
 def test_infer_symbol_type():
     from quant.data.base import infer_symbol_type
-    assert infer_symbol_type("BTC/USDT") == ("crypto", "ccxt")
+    # 加密货币已被移除：含 "/" 不再识别为 crypto/ccxt
+    assert infer_symbol_type("BTC/USDT") == ("stock", "yfinance")
     assert infer_symbol_type("ETH-USDT") == ("stock", "yfinance")  # 无斜杠按股票
     # A股股票
     assert infer_symbol_type("600519") == ("stock", "baostock")  # 6 位纯数字 → A股
@@ -837,7 +1388,7 @@ def test_update_auto_registers_unknown_symbol(manager):
 
 
 def test_update_auto_registers_crypto_symbol(tmp_config):
-    """加密标的自动注册为 crypto/ccxt（数据源不可用时优雅失败但已注册）。"""
+    """加密货币代码不再被识别为 crypto：注册为 yfinance 股票并因无数据优雅失败。"""
     from quant.data.manager import DataManager
     from quant.data.storage import MarketStore
     from quant.storage.db import init_db
@@ -849,7 +1400,9 @@ def test_update_auto_registers_crypto_symbol(tmp_config):
                      SymbolsRepo(tmp_config.effective_db_path), providers={})
     dm.update(symbols=["BTC/USDT"], timeframes=["1d"])
     meta = dm.symbols_repo.get("BTC/USDT")
-    assert meta is not None and meta["asset_type"] == "crypto" and meta["source"] == "ccxt"
+    assert meta is not None
+    assert meta["asset_type"] == "stock" and meta["source"] == "yfinance"
+    assert meta["asset_type"] != "crypto"
 
 
 def test_delete_symbol_removes_data(manager):

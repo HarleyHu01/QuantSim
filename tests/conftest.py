@@ -30,7 +30,8 @@ class FakeProvider(DataProvider):
 
     def __init__(self, healthy: bool = True, fail_fetch: bool = False,
                  window_start: str = "2024-01-01", periods: int = 10,
-                 freq: str = "D", use_start: bool = False, flat: bool = False):
+                 freq: str = "D", use_start: bool = False, flat: bool = False,
+                 anchor_end: bool = False):
         self.healthy = healthy
         self.fail_fetch = fail_fetch
         self.window_start = window_start
@@ -38,6 +39,10 @@ class FakeProvider(DataProvider):
         self.freq = freq
         self.use_start = use_start
         self.flat = flat  # 平价数据（open==close），避免权重漂移
+        # anchor_end=True：把 periods 根 bar 的**最后一根对齐到请求的 end**（即「现在」）。
+        # 模拟盘/实时测试需要数据紧贴当下，否则以一年前为起点算出的 bar 会让
+        # 「首次 tick 只补算最近 N 根」的断言随运行时刻漂移。
+        self.anchor_end = anchor_end
         self.calls = 0
 
     def _ping(self) -> None:
@@ -50,8 +55,18 @@ class FakeProvider(DataProvider):
             raise RuntimeError("fake down")
         if self.fail_fetch:
             raise RuntimeError("fake fetch boom")
-        if self.use_start:
+        if self.use_start and self.anchor_end and end is not None:
+            idx = pd.date_range(end=end, periods=self.periods, freq=self.freq, tz="UTC")
+        elif self.use_start:
             idx = pd.date_range(start=start, periods=self.periods, freq=self.freq, tz="UTC")
+            # 不编造落在请求区间之外（尤其未来）的 bar —— 真实数据源不会返回 end 之后的数据。
+            # 否则增量拉取时 start 已经贴近当下，periods 根会一路排到未来，
+            # 让「首次 tick 只补算最近 N 根」这类断言随运行时刻漂移而失败。
+            if end is not None:
+                end_ts = pd.Timestamp(end)
+                if end_ts.tzinfo is None:
+                    end_ts = end_ts.tz_localize("UTC")
+                idx = idx[idx <= end_ts]
         else:
             idx = pd.date_range(self.window_start, periods=self.periods, freq=self.freq, tz="UTC")
         if self.flat:

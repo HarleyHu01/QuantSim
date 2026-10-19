@@ -1,7 +1,7 @@
 # 可选数据源：
 #   baostock —— A股股票/指数/ETF（股票 1990-12-19 起、指数 2006-01-01 起、ETF 2026-01-05 起；
 #               日/周/月 + 5/15/30/60 分钟；指数无分钟线）【A股主源】
-#   akshare  —— A股备用源（股票/指数/ETF 三通道 fallback）+ 期货（baostock 不覆盖期货）
+#   akshare  —— A股备用源（股票/指数/ETF，仅东方财富通道；失败即交给腾讯兜底）
 # 安装失败不影响系统其他功能，对应 provider 会自动降级为 unhealthy 并走 fallback 链。
 #
 # Python 3.14 提示：akshare 的旧依赖 jsonpath 可能构建失败，可先执行：

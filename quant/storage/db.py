@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS strategies (
   strategy_type TEXT NOT NULL DEFAULT 'builtin',
   class_name TEXT,
   config_json TEXT NOT NULL DEFAULT '{}',
+  source_code TEXT DEFAULT '',
   enabled INTEGER DEFAULT 1,
   weight REAL DEFAULT 100.0,
   created_at TEXT DEFAULT (datetime('now')),
@@ -206,6 +207,27 @@ CREATE TABLE IF NOT EXISTS kv_store (
   key TEXT PRIMARY KEY,
   value_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS llm_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT DEFAULT '新对话',
+  mode TEXT DEFAULT 'code',
+  strategy_id INTEGER,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS llm_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT DEFAULT '',
+  code TEXT DEFAULT '',
+  meta_json TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_messages_session ON llm_messages(session_id, id);
 """
 
 
@@ -269,6 +291,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
     pt_cols = {r[1] for r in conn.execute("PRAGMA table_info(paper_trades)")}
     if "sub_key" not in pt_cols:
         conn.execute("ALTER TABLE paper_trades ADD COLUMN sub_key TEXT DEFAULT ''")
+    # strategies.source_code（第 9 步：用户/AI 可直接编辑的 Python 代码）
+    st_cols = {r[1] for r in conn.execute("PRAGMA table_info(strategies)")}
+    if "source_code" not in st_cols:
+        conn.execute("ALTER TABLE strategies ADD COLUMN source_code TEXT DEFAULT ''")
+    # llm_prompts 审计表补列（第 9 步：记录模式/耗时/输出摘要）
+    lp_cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_prompts)")}
+    for col, ddl in (
+        ("mode", "ALTER TABLE llm_prompts ADD COLUMN mode TEXT DEFAULT 'code'"),
+        ("ok", "ALTER TABLE llm_prompts ADD COLUMN ok INTEGER DEFAULT 1"),
+        ("detail", "ALTER TABLE llm_prompts ADD COLUMN detail TEXT DEFAULT ''"),
+    ):
+        if col not in lp_cols:
+            conn.execute(ddl)
 
 
 @contextmanager

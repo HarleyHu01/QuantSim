@@ -15,7 +15,7 @@ from quant.strategies.registry import create, ensure_loaded
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 
 # 分钟级周期：基准缺失时不用分钟级基准（改用日线近似，避免免费分钟数据拉取卡住回测）
-_MINUTE_TFS = {"5m", "15m", "30m", "60m", "1h", "2h", "4h"}
+_MINUTE_TFS = {"5m", "15m", "30m", "60m", "1h"}
 
 
 class BacktestSingleIn(BaseModel):
@@ -156,7 +156,13 @@ def backtest_single(body: BacktestSingleIn) -> dict:
     settings.timeframe = body.timeframe
     port_cfg = PortfolioConfig(mode="signal_merge", weights={body.strategy_id: 100.0})
     engine = _build_engine(body.engine, settings, port_cfg)
-    strategy = create(body.strategy_id, body.params)
+    # 单策略回测的 params 就是该策略自己的参数（与 /combo 的 {key: params} 不同，
+    # 但调用方两种形状都可能传），这里把 {strategy_id: {...}} 形状也解开。
+    params = body.params or {}
+    nested = params.get(body.strategy_id)
+    if isinstance(nested, dict):
+        params = nested
+    strategy = create(body.strategy_id, params)
     benchmark = _load_benchmark(dm, settings)
     result = engine.run({body.symbol: bars}, [strategy], _symbol_meta(dm, [body.symbol]),
                         benchmark_bars=benchmark)
@@ -205,16 +211,6 @@ def backtest_combo(body: BacktestComboIn) -> dict:
 @router.get("/runs")
 def list_runs(limit: int = 50) -> dict:
     return {"runs": app_state["backtest_repo"].list_runs(limit)}
-
-
-@router.get("/runs/{run_id}")
-def get_run(run_id: int) -> dict:
-    run = app_state["backtest_repo"].get_run(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="回测不存在")
-    import json
-    run["metrics_json"] = json.loads(run.get("metrics_json") or "{}")
-    return run
 
 
 @router.get("/runs/{run_id}/equity")

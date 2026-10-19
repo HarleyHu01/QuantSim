@@ -1,0 +1,15 @@
+# QuantSim Streamlit 主题配置
+# 统一的「量化终端」视觉世界：深色底 + 青绿主色 + 红绿涨跌语义色
+
+[theme]
+primaryColor = "#22d3ee"
+backgroundColor = "#0b1220"
+secondaryBackgroundColor = "#111a2e"
+textColor = "#e6edf7"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

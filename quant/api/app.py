@@ -10,18 +10,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from quant.api.routers import backtest as backtest_router
 from quant.api.routers import data as data_router
+from quant.api.routers import fusion as fusion_router
+from quant.api.routers import llm as llm_router
+from quant.api.routers import ml as ml_router
 from quant.api.routers import paper as paper_router
 from quant.api.routers import portfolio as portfolio_router
 from quant.api.routers import settings as settings_router
 from quant.api.routers import strategies as strategies_router
 from quant.api.routers import system as system_router
+from quant.api.routers import workbuddy as workbuddy_router
 from quant.api.state import app_state
 from quant.core.config import AppConfig
 from quant.core.utils import detect_environment
 from quant.data.manager import DataManager
 from quant.engine.paper import PaperTradingEngine
 from quant.storage.db import init_db
-from quant.storage.repositories import (BacktestRepo, PaperRepo, PortfolioRepo,
+from quant.storage.repositories import (BacktestRepo, LLMRepo, PaperRepo, PortfolioRepo,
                                        SettingsRepo, StrategiesRepo, SymbolsRepo)
 from quant.strategies.registry import ensure_loaded, list_all
 
@@ -64,6 +68,7 @@ async def lifespan(app: FastAPI):
     init_db(config.effective_db_path)
     dm = DataManager.create(config)
     seed_symbols(config, dm)
+    dm.warm_up()  # 后台预热 baostock 登录会话（login 需 11~13s，不预热会让健康检查误报超时）
 
     scheduler = AsyncIOScheduler()
     scheduler.start()
@@ -85,13 +90,14 @@ async def lifespan(app: FastAPI):
     app_state["portfolio_repo"] = portfolio_repo
     app_state["settings_repo"] = SettingsRepo(config.effective_db_path)
     app_state["backtest_repo"] = BacktestRepo(config.effective_db_path)
+    app_state["llm_repo"] = LLMRepo(config.effective_db_path)
     log.info("QuantSim API 就绪: db=%s market=%s", config.effective_db_path, config.effective_market_dir)
     yield
     scheduler.shutdown(wait=False)
     app_state.clear()
 
 
-app = FastAPI(title="QuantSim", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="QuantSim", version="1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -105,9 +111,13 @@ app.include_router(strategies_router.router, prefix="/api")
 app.include_router(portfolio_router.router, prefix="/api")
 app.include_router(settings_router.router, prefix="/api")
 app.include_router(system_router.router, prefix="/api")
+app.include_router(llm_router.router, prefix="/api")
+app.include_router(ml_router.router, prefix="/api")
+app.include_router(fusion_router.router, prefix="/api")
+app.include_router(workbuddy_router.router, prefix="/api")
 
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "app": "QuantSim", "version": "0.1.0",
+    return {"status": "ok", "app": "QuantSim", "version": "1.0",
             "environment": detect_environment()}

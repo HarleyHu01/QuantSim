@@ -269,8 +269,8 @@ bar t 收盘 → 目标仓位（combine） vs 当前仓位 → |Δ|>θ → Order
 
 ### 3.4 涨跌停（按 symbol 元数据，非全局）
 
-- `symbols.price_limit_pct`（如 0.10 主板 / 0.20 创业板·科创 / 0.05 ST；美股/加密 NULL=无）。
-- 新增 symbol 时默认：`stock→0.10`（可改）、`etf→0.10`（可改）、`crypto/future→NULL`，以元数据为准。
+- `symbols.price_limit_pct`（如 0.10 主板 / 0.20 创业板·科创 / 0.05 ST；美股 NULL=无）。
+- 新增 symbol 时默认：`stock→0.10`（可改）、`etf→0.10`（可改）、`index/us_stock→NULL`，以元数据为准。
 - 判定：`limit_up = prev_close×(1+pct)`、`limit_down = prev_close×(1−pct)`；
   涨停（`open ≥ limit_up×0.999`）禁买/禁开空；跌停（`open ≤ limit_down×1.001`）禁卖/禁平空；命中记 warning。
 
@@ -322,8 +322,7 @@ bar t 收盘 → 目标仓位（combine） vs 当前仓位 → |Δ|>θ → Order
 | 15m | interval 930s | +30s |
 | 30m | interval 1830s | +30s |
 | 1h | interval 3660s | +60s |
-| 2h / 4h | interval 周期+60s | |
-| 1d / 1w / 1M | **cron 按标的时区** | A股 Asia/Shanghai 15:30；美股 America/New_York 16:30；crypto 00:05 UTC（可配覆盖） |
+| 1d / 1w / 1M | **cron 按标的时区** | A股 Asia/Shanghai 15:30；美股 America/New_York 16:30（可配覆盖） |
 
 `poll_seconds` 参数可覆盖默认间隔。
 

@@ -46,7 +46,7 @@ def test_paper_full_chain(paper_env):
     """fake feed 3 bar：挂单→成交→持仓/成交/净值落库。"""
     cfg, dm, repo, scheduler, eng = paper_env
     aid = repo.create_account("测试账户", 1_000_000, {})
-    st = eng.start(aid, ["TEST"], "1d", ["test_step"],
+    st = eng.start(aid, ["TEST"], "1d", ["test_step"], warmup_bars=None,
                    settings={**ZERO, "execution": "next_open"})
     assert st["status"] == "running"
 
@@ -73,7 +73,8 @@ def test_paper_pending_persisted_until_next_bar(paper_env):
     """bar0 产生挂单并落库；bar1 成交后清空。"""
     cfg, dm, repo, scheduler, eng = paper_env
     aid = repo.create_account("测试2", 1_000_000, {})
-    eng.start(aid, ["TEST"], "1d", ["test_step"], settings={**ZERO, "execution": "next_open"})
+    eng.start(aid, ["TEST"], "1d", ["test_step"], settings={**ZERO, "execution": "next_open"},
+              warmup_bars=None)
 
     bars = dm.load_bars("TEST", "1d")
     # 只处理 bar0 → 挂单应已持久化
@@ -91,7 +92,8 @@ def test_paper_recover_restores_and_discards_pending(paper_env):
     """recover：重建 Broker（持仓恢复）、丢弃 PENDING、重注册任务。"""
     cfg, dm, repo, scheduler, eng = paper_env
     aid = repo.create_account("测试3", 1_000_000, {})
-    eng.start(aid, ["TEST"], "1d", ["test_step"], settings={**ZERO, "execution": "next_open"})
+    eng.start(aid, ["TEST"], "1d", ["test_step"], settings={**ZERO, "execution": "next_open"},
+              warmup_bars=None)
     eng._tick(aid, "TEST")
 
     # 模拟进程重启前残留一条挂单（recover 应丢弃）

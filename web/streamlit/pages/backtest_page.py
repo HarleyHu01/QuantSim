@@ -1,17 +1,26 @@
 """回测页：选标的/周期/策略/引擎 → 运行 → 指标卡片 + 图表 + 明细。"""
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pandas as pd
 import streamlit as st
 
 from web.streamlit.components import (ENGINE_LABELS, MODE_LABELS, TIMEFRAMES,
                                       comparison_option, drawdown_option, echarts,
-                                      kline_option, metric_label, metrics_row,
-                                      monthly_heatmap_option, strategy_label, tf_label,
-                                      to_dataframe)
+                                      inject_theme, kline_option, metric_label,
+                                      metrics_row, monthly_heatmap_option,
+                                      strategy_label, tf_label, to_dataframe)
+
+
+def _default_range() -> tuple[str, str]:
+    """默认回测区间：过去一年（今天往前推 365 天 → 今天）。"""
+    today = date.today()
+    return (today - timedelta(days=365)).isoformat(), today.isoformat()
 
 
 def render(api) -> None:
+    inject_theme()
     st.header("回测")
     status = api.data_status()
     items = [m for m in status.get("symbols", []) if m.get("rows")]
@@ -24,7 +33,7 @@ def render(api) -> None:
 
     c1, c2 = st.columns(2)
     sel_symbols = c1.multiselect("标的（从已有数据选择）", symbols, default=symbols[:1], key="bt_sym")
-    manual = st.text_input("或手动输入 symbol（逗号分隔，将自动拉取数据）：如 TSLA,600519,BTC/USDT",
+    manual = st.text_input("或手动输入 symbol（逗号分隔，将自动拉取数据）：如 600519.SH,000001.SZ,AAPL",
                            "", key="bt_manual")
     tf_idx = TIMEFRAMES.index("1d")
     timeframe = c2.selectbox("周期", TIMEFRAMES, index=tf_idx,
@@ -41,9 +50,12 @@ def render(api) -> None:
                               format_func=lambda k: strategy_labels.get(k, k),
                               default=strategy_keys[:1] if strategy_keys else [],
                               key="bt_st")
+    d_start, d_end = _default_range()
     c3, c4 = st.columns(2)
-    start = c3.text_input("开始日期（可选 YYYY-MM-DD）", "", key="bt_start")
-    end = c4.text_input("结束日期（可选 YYYY-MM-DD）", "", key="bt_end")
+    start = c3.text_input("开始日期（YYYY-MM-DD）", d_start, key="bt_start")
+    end = c4.text_input("结束日期（YYYY-MM-DD）", d_end, key="bt_end")
+    st.caption(f"默认区间为**过去一年**（{d_start} ~ {d_end}）；"
+               "清空两框则使用全部历史数据。")
 
     mode = st.selectbox("组合模式", list(MODE_LABELS.keys()),
                         format_func=lambda k: f"{MODE_LABELS[k]}（{k}）",

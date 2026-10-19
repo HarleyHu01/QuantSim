@@ -93,23 +93,3 @@ def paper_status(account_id: int | None = None) -> dict:
     if account_id is not None:
         return eng.status(account_id)
     return {"accounts": repo.list_accounts()}
-
-
-@router.get("/account")
-def paper_account(account_id: int) -> dict:
-    return {"account": _repo().get_account(account_id)}
-
-
-@router.get("/positions")
-def paper_positions(account_id: int) -> dict:
-    return {"positions": _repo().list_positions(account_id)}
-
-
-@router.get("/trades")
-def paper_trades(account_id: int, limit: int = 200) -> dict:
-    return {"trades": _repo().list_trades(account_id, limit)}
-
-
-@router.get("/equity")
-def paper_equity(account_id: int, limit: int = 10000) -> dict:
-    return {"equity": _repo().list_equity(account_id, limit)}

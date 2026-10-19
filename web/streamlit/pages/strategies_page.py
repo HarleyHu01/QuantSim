@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import streamlit as st
 
-from web.streamlit.components import render_params_form, strategy_label
+from web.streamlit.components import (inject_theme, render_params_form,
+                                      strategy_label)
 
 
 def render(api) -> None:
+    inject_theme()
     st.header("策略管理")
     st.caption("每个策略：启用开关 + 参数面板（按 schema 自动渲染，修改自动保存）")
 
@@ -17,14 +19,21 @@ def render(api) -> None:
         port_weights = {}
     for s in strategies:
         with st.container(border=True):
-            is_rule = s.get("strategy_type") == "llm_generated"
+            stype = s.get("strategy_type")
+            is_rule = stype == "llm_generated"
+            is_code = stype == "code"
+            editable = is_rule or is_code
             referenced = s["key"] in port_weights
             c1, c2, c3, c4 = st.columns([4.4, 1, 1, 1])
             with c1:
                 st.markdown(f"### {strategy_label(s)}  `{s['key']}`")
                 st.caption(s.get("description", ""))
                 if is_rule:
-                    st.caption("类型：声明式规则策略（手动创建）")
+                    st.caption("类型：声明式规则策略（手动创建或 AI 生成）")
+                elif is_code:
+                    ok = s.get("code_ok")
+                    st.caption(f"类型：Python 代码策略（{'校验通过' if ok else '校验未通过'}"
+                               f"，{s.get('code_lines', 0)} 行）")
                 if referenced:
                     st.caption("状态：**组合配置中使用中**（删除将自动从组合移除）")
             with c2:
@@ -34,13 +43,23 @@ def render(api) -> None:
                     api.strategy_toggle(s["id"])
                     st.rerun()
             with c3:
-                if is_rule and st.button("编辑", key=f"ed_{s['id']}"):
-                    st.session_state["rule_edit"] = {"config": s.get("config") or {},
-                                                     "key": s["key"]}
-                    st.session_state["nav_target"] = "策略创建"
-                    st.rerun()
+                if editable:
+                    if is_rule and st.button("编辑", key=f"ed_{s['id']}"):
+                        st.session_state["rule_edit"] = {"config": s.get("config") or {},
+                                                         "key": s["key"]}
+                        st.session_state["nav_target"] = "策略创建"
+                        st.rerun()
+                    if is_code and st.button("改代码", key=f"edc_{s['id']}"):
+                        try:
+                            r = api.llm_code(s["id"])
+                            st.session_state["ai_code"] = r.get("code") or ""
+                            st.session_state["ai_code_sid"] = s["id"]
+                            st.session_state["nav_target"] = "AI 策略"
+                            st.rerun()
+                        except Exception as e:  # noqa: BLE001
+                            st.error(f"读取源码失败：{e}")
             with c4:
-                if is_rule:
+                if editable:
                     if st.button("删除", key=f"del_{s['id']}"):
                         st.session_state[f"confirm_del_{s['id']}"] = True
                         st.rerun()

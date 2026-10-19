@@ -1,9 +1,12 @@
-"""交易设置页：TradingSettings 全字段表单（按类别分组），保存到 /api/settings/trading。"""
+"""交易设置页：TradingSettings 全字段表单（按类别分组），保存到 /api/settings/trading。
+
+数据源代理与存储路径已拆到独立的「数据设置」页（data_settings_page.py）。
+"""
 from __future__ import annotations
 
 import streamlit as st
 
-from web.streamlit.components import EXEC_LABELS, TIMEFRAMES, tf_label
+from web.streamlit.components import EXEC_LABELS, TIMEFRAMES, inject_theme, tf_label
 
 PCT_FIELDS = {
     "max_position_pct": (0.0, 1.0, "单标的最大仓位（权益比例）"),
@@ -18,7 +21,8 @@ PCT_FIELDS = {
 
 
 def render(api) -> None:
-    st.header("交易设置")
+    inject_theme()
+    st.markdown("## 交易设置")
     s = api.settings_trading()
 
     st.markdown("#### 资金")
@@ -48,7 +52,8 @@ def render(api) -> None:
 
     st.markdown("#### 交易频度")
     c = st.columns(3)
-    tf_idx = TIMEFRAMES.index(s.get("timeframe", "1d")) if s.get("timeframe") in TIMEFRAMES else 8
+    tf_idx = (TIMEFRAMES.index(s.get("timeframe", "1d"))
+              if s.get("timeframe") in TIMEFRAMES else TIMEFRAMES.index("1d"))
     s["timeframe"] = c[0].selectbox("周期", TIMEFRAMES, index=tf_idx,
                                     format_func=tf_label, key="ts_tf0")
     s["execution"] = c[1].selectbox("成交时点", list(EXEC_LABELS.keys()),
@@ -105,7 +110,7 @@ def render(api) -> None:
 
     st.markdown("#### 基准")
     st.caption("基准用于对比策略是否跑赢大盘（缺失时回测会自动拉取）")
-    bench_presets = ["SPY", "QQQ", "000300.SS", "000905.SS", "BTC-USD"]
+    bench_presets = ["SPY", "QQQ", "000300.SS", "000905.SS", "600519.SH"]
     current_bs = s.get("benchmark_symbol", "SPY") or "SPY"
     options = bench_presets + ["自定义..."]
     idx = bench_presets.index(current_bs) if current_bs in bench_presets else len(bench_presets)
@@ -124,3 +129,5 @@ def render(api) -> None:
     if st.button(" 保存交易设置", type="primary"):
         api.settings_trading_put({k: v for k, v in s.items()})
         st.success("已保存（回测/模拟盘默认使用）")
+
+

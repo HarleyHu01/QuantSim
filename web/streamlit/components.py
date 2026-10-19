@@ -1,4 +1,4 @@
-"""Streamlit 通用组件：schema 驱动参数表单、指标卡片、ECharts 图表。"""
+"""Streamlit 通用组件：schema 驱动参数表单、指标卡片、ECharts 图表、全局主题。"""
 from __future__ import annotations
 
 import json
@@ -6,9 +6,349 @@ import json
 import pandas as pd
 import streamlit as st
 
-TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"]
-MODE_LABELS = {"signal_merge": "信号加权 (signal_merge)", "capital_split": "资金分配 (capital_split)",
-               "equal": "等权 (equal)"}
+# ================= 全局主题（量化终端视觉世界） =================
+
+_GLOBAL_CSS = """
+<style>
+/* ---------- 基础排版 ---------- */
+html, body, [data-testid="stAppViewContainer"] {
+  font-family: "Manrope", "Outfit", -apple-system, "PingFang SC",
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  background: #0b1220;
+  color: #e6edf7;
+}
+[data-testid="stHeader"] { background: transparent; }
+
+/* ---------- 环境背景：简洁的高清光晕渐变（无网格/噪声装饰） ---------- */
+[data-testid="stAppViewContainer"] {
+  position: relative;
+  background:
+    radial-gradient(1200px 600px at 12% -8%, rgba(34,211,238,0.10), transparent 60%),
+    radial-gradient(1000px 560px at 100% 4%, rgba(56,120,255,0.09), transparent 55%),
+    radial-gradient(900px 620px at 50% 108%, rgba(16,185,129,0.07), transparent 60%),
+    #0b1220;
+  background-attachment: fixed;
+}
+[data-testid="stAppViewContainer"]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(620px 420px at 82% 18%, rgba(34,211,238,0.10), transparent 65%);
+  animation: qs-glow-breathe 14s ease-in-out infinite;
+}
+/* 保证正文浮在背景层之上 */
+[data-testid="stAppViewContainer"] > .main { position: relative; z-index: 1; }
+[data-testid="stSidebar"] { position: relative; z-index: 2; }
+
+@keyframes qs-grid-drift {
+  0%   { background-position: 0 0; }
+  100% { background-position: 0 44px; }
+}
+@keyframes qs-glow-breathe {
+  0%, 100% { opacity: 0.5; transform: translateY(0) scale(1); }
+  50%      { opacity: 1;   transform: translateY(-14px) scale(1.05); }
+}
+/* 时间线红点涟漪（yan.net.cn edu_timeline ripple 风格） */
+@keyframes qs-ripple {
+  0%   { transform: scale(1);    opacity: 0.8; }
+  100% { transform: scale(2.6);  opacity: 0; }
+}
+.qs-timeline-dot {
+  position: relative;
+  display: inline-block;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: #f87171;
+  vertical-align: middle;
+}
+.qs-timeline-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #f87171;
+  animation: qs-ripple 1.8s ease-out infinite;
+  pointer-events: none;
+}
+
+/* ---------- 主区域留白与宽度 ---------- */
+[data-testid="stAppViewContainer"] > .main .block-container {
+  padding-top: 2.2rem;
+  padding-bottom: 3rem;
+  max-width: 1480px;
+}
+
+/* ---------- 页面大标题 ---------- */
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+  color: #f1f6ff;
+}
+h1 { font-weight: 700; }
+/* 斜切视觉语言：标题与标题前的青色斜块（yan.net.cn section_header 风格） */
+h2 {
+  font-weight: 650; border-bottom: 1px solid rgba(34,211,238,0.18);
+  padding-bottom: 0.55rem; margin-bottom: 0.4rem;
+  position: relative;
+}
+h2::before {
+  content: "";
+  display: inline-block;
+  width: 0.42em; height: 1.05em;
+  margin-right: 0.55em;
+  vertical-align: -0.12em;
+  background: linear-gradient(135deg, #22d3ee, #0ea5c4);
+  transform: skew(-20deg);
+  border-radius: 2px;
+}
+h3 { font-weight: 600; }
+h4, h5 { color: #9fb3d1; font-weight: 600; letter-spacing: 0.01em; }
+
+/* ---------- 侧边栏 ---------- */
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, #0d1526 0%, #0b1220 100%);
+  border-right: 1px solid rgba(34,211,238,0.14);
+}
+[data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
+/* 侧边栏内容区可上下滚动：导航项多时「关闭系统」按钮可滚到可见 */
+[data-testid="stSidebarContent"] {
+  max-height: calc(100vh - 60px) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34,211,238,0.25) transparent;
+}
+[data-testid="stSidebarContent"]::-webkit-scrollbar { width: 8px; }
+[data-testid="stSidebarContent"]::-webkit-scrollbar-thumb {
+  background: rgba(34,211,238,0.22);
+  border-radius: 6px;
+}
+[data-testid="stSidebarContent"]::-webkit-scrollbar-thumb:hover { background: rgba(34,211,238,0.38); }
+
+/* ---------- 卡片 / 容器 ---------- */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: rgba(17,26,46,0.72);
+  border: 1px solid rgba(34,211,238,0.14) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  transition: transform 0.22s cubic-bezier(0.16,1,0.3,1),
+              box-shadow 0.22s cubic-bezier(0.16,1,0.3,1),
+              border-color 0.22s ease;
+  will-change: transform;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover {
+  border-color: rgba(34,211,238,0.32) !important;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.38), 0 0 0 1px rgba(34,211,238,0.12);
+}
+/* 毛玻璃卡：半透明白 + backdrop 模糊（yan.net.cn .sec_component_para 风格） */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* ---------- 指标卡片 ---------- */
+[data-testid="stMetric"] {
+  background: rgba(17,26,46,0.85);
+  border: 1px solid rgba(34,211,238,0.12);
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  transition: transform 0.2s cubic-bezier(0.16,1,0.3,1),
+              border-color 0.2s ease,
+              box-shadow 0.2s ease;
+}
+[data-testid="stMetric"]:hover {
+  transform: translateY(-3px);
+  border-color: rgba(34,211,238,0.34);
+  box-shadow: 0 10px 26px rgba(0,0,0,0.4);
+}
+[data-testid="stMetricLabel"] { color: #9fb3d1; font-weight: 500; }
+[data-testid="stMetricValue"] { color: #f1f6ff; font-weight: 650; }
+
+/* ---------- 按钮 ---------- */
+.stButton > button, .stDownloadButton > button {
+  border-radius: 8px;
+  font-weight: 600;
+  transition: transform 0.18s cubic-bezier(0.16,1,0.3,1),
+              box-shadow 0.18s ease, filter 0.18s ease,
+              background-color 0.18s ease, color 0.18s ease,
+              border-color 0.18s ease;
+}
+/* 普通按钮：悬停上浮 + 描边亮起 + 轻微发光（明确的视觉反馈） */
+.stButton > button:hover, .stDownloadButton > button:hover {
+  transform: translateY(-2px);
+  border-color: rgba(34,211,238,0.6) !important;
+  color: #22d3ee !important;
+  box-shadow: 0 6px 18px rgba(34,211,238,0.22);
+}
+.stButton > button:active, .stDownloadButton > button:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: none;
+}
+.stButton > button:focus-visible, .stDownloadButton > button:focus-visible {
+  outline: 2px solid rgba(34,211,238,0.7);
+  outline-offset: 2px;
+}
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+  background: linear-gradient(180deg, #22d3ee 0%, #0ea5c4 100%);
+  color: #06222a;
+  border: none;
+  background-size: 100% 100%;
+  transform: skew(-8deg);
+}
+/* 主按钮斜切：内文字反斜切校正（yan.net.cn theme_default_btn 风格） */
+.stButton > button[kind="primary"] > div[data-testid="stMarkdownContainer"],
+.stButton > button[kind="primary"] p,
+.stDownloadButton > button[kind="primary"] > div {
+  transform: skew(8deg);
+  display: inline-block;
+}
+.stButton > button[kind="primary"]:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 0 0 1px rgba(34,211,238,0.5), 0 8px 22px rgba(34,211,238,0.36);
+  transform: translateY(-2px) skew(-8deg);
+}
+.stButton > button[kind="primary"]:active {
+  filter: brightness(0.96);
+  transform: translateY(0) scale(0.97) skew(-8deg);
+}
+
+/* ---------- 输入控件 ---------- */
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
+.stTextArea textarea, [data-testid="stSelectbox"] > div,
+[data-baseweb="select"] > div {
+  border-radius: 8px !important;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+[data-testid="stTextInput"] input:focus, [data-testid="stNumberInput"] input:focus,
+.stTextArea textarea:focus {
+  border-color: rgba(34,211,238,0.6) !important;
+  box-shadow: 0 0 0 3px rgba(34,211,238,0.14);
+}
+
+/* ---------- 分隔线 ---------- */
+hr { border-color: rgba(34,211,238,0.14); }
+
+/* ---------- expander ---------- */
+[data-testid="stExpander"] {
+  border: 1px solid rgba(34,211,238,0.14);
+  border-radius: 10px;
+  transition: border-color 0.2s ease;
+}
+[data-testid="stExpander"]:hover { border-color: rgba(34,211,238,0.3); }
+
+/* ---------- 提示框圆角 ---------- */
+[data-testid="stAlert"] { border-radius: 10px; }
+
+/* ---------- 表格 ---------- */
+[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
+
+/* ---------- 侧边栏导航 radio 悬停反馈 ---------- */
+[data-testid="stSidebar"] [data-testid="stRadio"] label {
+  transition: transform 0.16s ease, opacity 0.16s ease;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+  transform: translateX(3px);
+}
+
+/* ---------- 涨跌语义色 ---------- */
+.up   { color: #f87171; }
+.down { color: #34d399; }
+
+/* ---------- 焦点可见性（键盘可达性） ---------- */
+:focus-visible {
+  outline: 2px solid rgba(34,211,238,0.7);
+  outline-offset: 2px;
+}
+
+/* ---------- 文本选择 / 滚动条（浏览器表面也要承载设计） ---------- */
+::selection { background: rgba(34,211,238,0.28); color: #f1f6ff; }
+* { scrollbar-width: thin; scrollbar-color: rgba(34,211,238,0.25) transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(34,211,238,0.22);
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(34,211,238,0.38); }
+
+/* ---------- 减弱动效：尊重系统偏好，保留语义反馈 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  [data-testid="stAppViewContainer"]::before,
+  [data-testid="stAppViewContainer"]::after {
+    animation: none;
+  }
+  [data-testid="stVerticalBlockBorderWrapper"],
+  [data-testid="stMetric"],
+  .stButton > button, .stDownloadButton > button,
+  [data-testid="stSidebar"] [data-testid="stRadio"] label {
+    transition: none;
+  }
+  [data-testid="stVerticalBlockBorderWrapper"]:hover,
+  [data-testid="stMetric"]:hover,
+  .stButton > button:hover {
+    transform: none;
+  }
+}
+</style>
+"""
+
+
+def inject_theme() -> None:
+    """注入全局主题 CSS。每个页面 render 前调用一次（幂等，streamlit 自动去重）。"""
+    st.markdown(_GLOBAL_CSS, unsafe_allow_html=True)
+
+
+def scroll_to_top(times: tuple[int, ...] = (0, 60, 200, 500)) -> None:
+    """把页面主滚动区滚回顶部（用于「打开页面应从顶部开始」的场合）。
+
+    Streamlit 在 rerun 后会保留浏览器滚动位置，Python 侧无法控制，
+    只能用一次性的内嵌脚本把滚动容器归零。这里按多个时间点重复执行，
+    因为首屏元素是分批挂载的，只在 DOMContentLoaded 时滚一次会被随后的
+    布局撑开又推回原位。
+    """
+    delays = ",".join(str(int(t)) for t in times)
+    st.components.v1.html(
+        f"""<script>
+        (function () {{
+          const delays = [{delays}];
+          const selectors = ['section.main', '[data-testid="stMain"]',
+                             '[data-testid="stAppViewContainer"]',
+                             '[data-testid="stMainBlockContainer"]', 'body'];
+          function reset() {{
+            try {{
+              const doc = window.parent.document;
+              for (const s of selectors) {{
+                const el = doc.querySelector(s);
+                if (el) el.scrollTop = 0;
+              }}
+              window.parent.scrollTo(0, 0);
+            }} catch (e) {{ /* 跨域或容器不存在时静默 */ }}
+          }}
+          for (const d of delays) setTimeout(reset, d);
+        }})();
+        </script>""",
+        height=0,
+    )
+
+
+TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"]
+# 各周期的通用提示（UI 用）。刻意**不写任何具体根数/天数**：
+# 同一接口在不同时段、不同标的、不同网络下的实际可返回量并不相同，
+# 把某台机器某次实测的数字写死在界面上，换一台电脑就会变成误导。
+TF_COVERAGE_HINT = {
+    "1m": "最短周期，历史深度最浅，通常只够看最近一两个交易日",
+    "5m": "分钟线，历史深度取决于数据源当下的限制",
+    "15m": "分钟线，历史深度取决于数据源当下的限制",
+    "30m": "分钟线，历史深度取决于数据源当下的限制",
+    "1h": "分钟线，历史深度取决于数据源当下的限制",
+    "1d": "日线，多数数据源可回溯到上市首日",
+    "1w": "周线，多数数据源可回溯到上市首日",
+    "1M": "最长周期，通常能覆盖全部历史",
+}
+MODE_LABELS = {"signal_merge": "信号加权", "capital_split": "资金分配",
+               "equal": "等权"}
 ENGINE_LABELS = {"event_driven": "事件驱动回测 (event_driven)", "vectorized": "向量化回测 (vectorized)"}
 EXEC_LABELS = {"next_open": "下一根开盘成交", "same_close": "当根收盘成交"}
 ADJUST_LABELS = {"qfq": "前复权 (qfq)", "hfq": "后复权 (hfq)", "none": "不复权 (none)"}
@@ -33,8 +373,6 @@ TF_LABELS = {
     "15m": "15分钟 (15 Minutes)",
     "30m": "30分钟 (30 Minutes)",
     "1h": "1小时 (1 Hour)",
-    "2h": "2小时 (2 Hours)",
-    "4h": "4小时 (4 Hours)",
     "1d": "日线 (Daily)",
     "1w": "周线 (Weekly)",
     "1M": "月线 (Monthly)",
@@ -327,6 +665,70 @@ def kline_option(bars: list[dict], trades: list[dict], symbol: str) -> dict:
             {"name": "成交量", "type": "bar", "xAxisIndex": 1, "yAxisIndex": 1, "data": vols},
         ],
     }
+
+
+def forecast_option(payload: dict) -> dict:
+    """历史收盘价 + Kronos 预测区间（预测部分用虚线并把置信带画出来）。
+
+    payload 来自 POST /api/ml/kronos/predict：
+        {history: [{t, close}], forecast: [{t, open, high, low, close}], symbol, timeframe}
+    """
+    history = payload.get("history") or []
+    forecast = payload.get("forecast") or []
+    if not history and not forecast:
+        return {}
+
+    h_ts = [str(r["t"])[:16] for r in history]
+    f_ts = [str(r["t"])[:16] for r in forecast]
+    labels = h_ts + f_ts
+    # 实测段：真实收盘价；预测段留空，折线在衔接处自然断开
+    actual = [r.get("close") for r in history] + [None] * len(f_ts)
+    # 预测段：起点接上真实最后一点，视觉上连成一条线
+    pred = [None] * len(h_ts) + [r.get("close") for r in forecast]
+    if history and forecast:
+        pred[len(h_ts) - 1] = history[-1].get("close")
+    # 预测区间用高低两条淡虚线表示（比 areaStyle 更直观，也不依赖轴类型）
+    hi = [None] * len(h_ts) + [r.get("high") for r in forecast]
+    lo = [None] * len(h_ts) + [r.get("low") for r in forecast]
+
+    return {
+        "title": {
+            "text": f"{payload.get('symbol', '')} {payload.get('timeframe', '')} · Kronos 预测",
+            "left": "center",
+            "textStyle": {"fontSize": 13},
+        },
+        "tooltip": {"trigger": "axis"},
+        "legend": {"data": ["实际收盘", "预测收盘", "预测最高", "预测最低"], "top": 24},
+        "grid": {"left": 62, "right": 24, "top": 56, "bottom": 44},
+        "xAxis": {"type": "category", "data": labels, "axisLabel": {"fontSize": 9}},
+        "yAxis": {"scale": True, "axisLabel": {"fontSize": 9}},
+        "dataZoom": [{"type": "inside", "start": 0, "end": 100}],
+        "series": [
+            {"name": "实际收盘", "type": "line", "data": actual, "showSymbol": False,
+             "lineStyle": {"width": 1.6, "color": "#1f77b4"}},
+            {"name": "预测收盘", "type": "line", "data": pred, "showSymbol": True,
+             "symbolSize": 4,
+             "lineStyle": {"width": 2, "type": "dashed", "color": "#d62728"},
+             "itemStyle": {"color": "#d62728"}},
+            {"name": "预测最高", "type": "line", "data": hi, "showSymbol": False,
+             "lineStyle": {"width": 1, "type": "dotted", "color": "#f0a0a0"}},
+            {"name": "预测最低", "type": "line", "data": lo, "showSymbol": False,
+             "lineStyle": {"width": 1, "type": "dotted", "color": "#a0c8f0"}},
+        ],
+    }
+
+
+# ---- 数据源代理模式（系统设置 → 数据源代理 与 数据管理页共用）----
+PROXY_MODE_LABELS = {
+    "auto": "跟随系统",
+    "direct": "强制直连（不走代理）",
+    "proxy": "强制走代理",
+}
+PROXY_MODE_HINTS = {
+    "auto": "跟随系统 HTTP(S)_PROXY 与 NO_PROXY",
+    "direct": "绕过所有代理，直接访问（适合国内站点）",
+    "proxy": "忽略 NO_PROXY，显式走系统代理（适合需翻墙的国外站点）",
+}
 
 
 def to_dataframe(rows: list[dict]) -> pd.DataFrame:

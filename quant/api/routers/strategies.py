@@ -73,6 +73,29 @@ def _rule_meta(row: dict) -> dict:
     }
 
 
+def _code_meta(row) -> dict:
+    """代码策略的展示元信息（参数 schema 从源码静态解析，不执行）。"""
+    from quant.strategies.code_strategy import inspect_source
+
+    code = row.get("source_code") or ""
+    info = inspect_source(code) if code.strip() else {"ok": False, "errors": ["无源码"]}
+    try:
+        cfg = json.loads(row.get("config_json") or "{}")
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    return {
+        "name": row.get("name") or "AI 代码策略",
+        "display_name": row.get("name") or "AI 代码策略",
+        "description": row.get("description", ""),
+        "params_schema": info.get("params_schema") or {},
+        "params": cfg.get("params_defaults") or info.get("params_defaults") or {},
+        "has_code": bool(code.strip()),
+        "code_ok": bool(info.get("ok")),
+        "code_errors": info.get("errors", []),
+        "code_lines": len(code.splitlines()),
+    }
+
+
 @router.get("")
 def list_strategies() -> dict:
     """DB 策略行 + 注册表/声明式元信息（params_schema 供 UI 渲染参数表单）。"""
@@ -83,6 +106,8 @@ def list_strategies() -> dict:
         if row.get("strategy_type") == "llm_generated":
             meta = _rule_meta(row)
             out.append({**row, **meta})
+        elif row.get("strategy_type") == "code":
+            out.append({**row, **_code_meta(row)})
         else:
             meta = metas.get(row["key"], {})
             out.append({
@@ -94,12 +119,6 @@ def list_strategies() -> dict:
                 "params": json.loads(row.get("config_json") or "{}"),
             })
     return {"strategies": out}
-
-
-@router.get("/builtins")
-def list_builtins() -> dict:
-    ensure_loaded()
-    return {"strategies": list_all()}
 
 
 @router.get("/indicators")
@@ -174,7 +193,8 @@ def update_strategy(strategy_id: int, body: StrategyUpdateIn) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="策略不存在")
     params = body.params
-    if params is not None and row.get("strategy_type") == "llm_generated":
+    stype = row.get("strategy_type")
+    if params is not None and stype == "llm_generated":
         # 声明式策略：params 只更新可调子集，保留 indicators/conditions
         try:
             cfg = json.loads(row.get("config_json") or "{}")
@@ -183,12 +203,17 @@ def update_strategy(strategy_id: int, body: StrategyUpdateIn) -> dict:
         clean = {k: (None if v == "None" else v) for k, v in (params or {}).items()}
         cfg["params"] = {**(cfg.get("params") or {}), **clean}
         params = cfg
+    elif params is not None and stype == "code":
+        # 代码策略：参数由源码 Params 定义，存 params_defaults 供回测覆盖
+        clean = {k: (None if v == "None" else v) for k, v in (params or {}).items()}
+        params = {"params_defaults": clean}
     repo.update(strategy_id, config_json=params, enabled=body.enabled, weight=body.weight)
     updated = repo.get_by_id(strategy_id)
-    return _rule_meta(updated) | {"id": updated["id"], "key": updated["key"],
-                                  "enabled": updated["enabled"], "weight": updated["weight"],
-                                  "strategy_type": updated["strategy_type"]} \
-        if updated.get("strategy_type") == "llm_generated" else updated
+    if updated.get("strategy_type") == "llm_generated":
+        return {**updated, **_rule_meta(updated)}
+    if updated.get("strategy_type") == "code":
+        return {**updated, **_code_meta(updated)}
+    return updated
 
 
 @router.post("/{strategy_id}/toggle")

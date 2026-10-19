@@ -4,10 +4,12 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from web.streamlit.components import MODE_LABELS, metrics_row, strategy_label, to_dataframe
+from web.streamlit.components import (MODE_LABELS, inject_theme, metrics_row,
+                                      strategy_label, to_dataframe)
 
 
 def render(api) -> None:
+    inject_theme()
     st.header("组合配置")
     strategies = api.strategies()
     saved = api.portfolio_get()
